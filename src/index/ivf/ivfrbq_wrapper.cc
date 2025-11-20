@@ -11,7 +11,9 @@
 
 #include "index/ivf/ivfrbq_wrapper.h"
 
+#include <cstdlib>
 #include <memory>
+#include <vector>
 
 #include "faiss/IndexCosine.h"
 #include "faiss/IndexFlat.h"
@@ -21,6 +23,90 @@
 #include "index/refine/refine_utils.h"
 
 namespace knowhere {
+
+// Cached distance computer for HNSW + IVF_RABITQ optimization
+// Pre-computes all centroids and caches FlatCodesDistanceComputer objects
+// This wraps the IndexIVFRaBitQ distance computation with PreTransform support
+struct CachedHNSWRaBitDistanceComputer : faiss::DistanceComputer {
+    const float* q = nullptr;
+    const faiss::IndexIVFRaBitQ* parent = nullptr;
+    const faiss::IndexPreTransform* pretransform = nullptr;  // For applying rotation
+    
+    // Cached data
+    std::vector<std::vector<float>> centroids;  // Pre-computed centroids for all lists
+    std::vector<std::unique_ptr<faiss::FlatCodesDistanceComputer>> distance_computers;  // One per list
+    int cached_qb = -1;  // Track the qb value used for cached distance computers
+    std::unique_ptr<const float[]> transformed_query;  // Store transformed query
+    
+    CachedHNSWRaBitDistanceComputer(const faiss::IndexIVFRaBitQ* parent_index, 
+                                  const faiss::IndexPreTransform* pt)
+        : parent(parent_index), pretransform(pt) {
+        // Pre-compute all centroids (these don't change)
+        const size_t nlist = parent->nlist;
+        centroids.resize(nlist);
+        distance_computers.resize(nlist);
+        
+        for (size_t list_no = 0; list_no < nlist; ++list_no) {
+            // Reconstruct centroid
+            centroids[list_no].resize(parent->d);
+            parent->quantizer->reconstruct(list_no, centroids[list_no].data());
+        }
+    }
+    
+    void set_query(const float* x) override {
+        // Apply pretransform (rotation) if available
+        if (pretransform != nullptr && !pretransform->chain.empty()) {
+            const float* xt = pretransform->apply_chain(1, x);
+            if (xt != x) {
+                transformed_query.reset(xt);
+                q = transformed_query.get();
+            } else {
+                q = x;
+            }
+        } else {
+            q = x;
+        }
+        
+        // Check if we need to recreate distance computers due to qb change
+        if (cached_qb != parent->qb) {
+            // Recreate all distance computers with the new qb value
+            for (size_t list_no = 0; list_no < centroids.size(); ++list_no) {
+                distance_computers[list_no].reset(
+                    parent->rabitq.get_distance_computer(parent->qb, centroids[list_no].data()));
+            }
+            cached_qb = parent->qb;
+        }
+        
+        // Set query on all cached distance computers
+        // Note: For cosine, query is already normalized at Search level
+        for (auto& dc : distance_computers) {
+            if (dc) {
+                dc->set_query(q);
+            }
+        }
+    }
+    
+    float operator()(faiss::idx_t i) override {
+        // Find the appropriate list
+        faiss::idx_t lo = parent->direct_map.get(i);
+        uint64_t list_no = faiss::lo_listno(lo);
+        uint64_t offset = faiss::lo_offset(lo);
+        
+        const uint8_t* code = parent->invlists->get_single_code(list_no, offset);
+        
+        // Use cached distance computer for this list
+        float distance = distance_computers[list_no]->distance_to_code(code);
+        
+        // Release code
+        parent->invlists->release_codes(list_no, code);
+        
+        return distance;
+    }
+    
+    float symmetric_dis(faiss::idx_t i, faiss::idx_t j) override {
+        FAISS_THROW_MSG("Not implemented");
+    }
+};
 
 expected<std::unique_ptr<IndexIVFRaBitQWrapper>>
 IndexIVFRaBitQWrapper::create(const faiss::idx_t d, const size_t nlist, const IvfRaBitQConfig& ivf_rabitq_cfg,
@@ -127,7 +213,28 @@ IndexIVFRaBitQWrapper::merge_from(Index& otherIndex, faiss::idx_t add_id) {
 
 faiss::DistanceComputer*
 IndexIVFRaBitQWrapper::get_distance_computer() const {
+    // Default: use standard distance computer
     return index->get_distance_computer();
+}
+
+// IndexHNSWRaBitQWrapper implementation
+faiss::DistanceComputer*
+IndexHNSWRaBitQWrapper::get_distance_computer() const {
+    // Always use cached distance computer when enabled for HNSW optimization
+    if (use_cached_distance_computer) {
+        // Return cached version for HNSW optimization
+        auto* ivfrabitq_idx = get_ivfrabitq_index();
+        if (ivfrabitq_idx != nullptr) {
+            // Get the PreTransform index to apply rotation
+            faiss::IndexRefine* index_refine = dynamic_cast<faiss::IndexRefine*>(index.get());
+            faiss::Index* index_for_pt = (index_refine != nullptr) ? index_refine->base_index : index.get();
+            faiss::IndexPreTransform* index_pt = dynamic_cast<faiss::IndexPreTransform*>(index_for_pt);
+            
+            return new CachedHNSWRaBitDistanceComputer(ivfrabitq_idx, index_pt);
+        }
+    }
+    // Default: use standard distance computer
+    return IndexIVFRaBitQWrapper::get_distance_computer();
 }
 
 faiss::IndexIVFRaBitQ*
