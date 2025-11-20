@@ -3164,24 +3164,9 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
         DataSetPtr search_dataset = dataset;
         
         if (is_cosine) {
-            auto rows = dataset->GetRows();
-            auto dim = dataset->GetDim();
-            auto data = dataset->GetTensor();
-            
-            // Create normalized query dataset
-            normalized_query_dataset = std::make_shared<DataSet>();
-            normalized_query_dataset->SetRows(rows);
-            normalized_query_dataset->SetDim(dim);
-            normalized_query_dataset->SetIsOwner(true);
-            
-            // Allocate and copy
-            size_t data_size = rows * dim * sizeof(float);
-            float* normalized_data = static_cast<float*>(malloc(data_size));
-            memcpy(normalized_data, data, data_size);
-            normalized_query_dataset->SetTensor(normalized_data);
-            
-            // Normalize
-            NormalizeDataset<float>(normalized_query_dataset);
+            // Create normalized query dataset using utility function
+            auto [normalized_ds, norms] = CopyAndNormalizeDataset<float>(dataset);
+            normalized_query_dataset = normalized_ds;
             search_dataset = normalized_query_dataset;
         }
         
@@ -3236,20 +3221,9 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
                 return Status::invalid_args;
             }
             
-            // Create a normalized copy for IVF_RABITQ
-            normalized_dataset_for_ivf = std::make_shared<DataSet>();
-            normalized_dataset_for_ivf->SetRows(float_ds->GetRows());
-            normalized_dataset_for_ivf->SetDim(float_ds->GetDim());
-            normalized_dataset_for_ivf->SetIsOwner(true);
-            
-            // Allocate and copy
-            size_t data_size = float_ds->GetRows() * float_ds->GetDim() * sizeof(float);
-            float* normalized_data = static_cast<float*>(malloc(data_size));
-            memcpy(normalized_data, float_ds->GetTensor(), data_size);
-            normalized_dataset_for_ivf->SetTensor(normalized_data);
-            
-            // Normalize the copy
-            NormalizeDataset<float>(normalized_dataset_for_ivf);
+            // Create a normalized copy for IVF_RABITQ using utility function
+            auto [normalized_ds, norms] = CopyAndNormalizeDataset<float>(float_ds);
+            normalized_dataset_for_ivf = normalized_ds;
         }
 
         auto finalize_index = [&](int i) {
