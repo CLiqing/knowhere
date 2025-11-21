@@ -19,6 +19,7 @@ namespace knowhere {
 expected<faiss::ScalarQuantizer::QuantizerType>
 get_sq_quantizer_type(const std::string& sq_type) {
     std::map<std::string, faiss::ScalarQuantizer::QuantizerType> sq_types = {
+        {"sq4", faiss::ScalarQuantizer::QT_4bit},
         {"sq6", faiss::ScalarQuantizer::QT_6bit},
         {"sq8", faiss::ScalarQuantizer::QT_8bit},
         {"fp16", faiss::ScalarQuantizer::QT_fp16},

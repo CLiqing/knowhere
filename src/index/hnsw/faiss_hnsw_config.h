@@ -137,7 +137,7 @@ class FaissHnswSqConfig : public FaissHnswConfig {
     bool
     WhetherAcceptableQuantType(const std::string& sq_type) {
         // todo: add more
-        std::vector<std::string> allowed_list = {"sq6", "sq8", "fp16", "bf16"};
+        std::vector<std::string> allowed_list = {"sq4", "sq6", "sq8", "fp16", "bf16"};
         std::string sq_type_tolower = str_to_lower(sq_type);
 
         for (const auto& allowed : allowed_list) {
