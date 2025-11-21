@@ -3164,8 +3164,15 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
         DataSetPtr search_dataset = dataset;
         
         if (is_cosine) {
-            // Create normalized query dataset using utility function
-            auto [normalized_ds, norms] = CopyAndNormalizeDataset<float>(dataset);
+            // Convert to float
+            auto float_ds = convert_ds_to_float(dataset, data_format);
+            if (float_ds == nullptr) {
+                LOG_KNOWHERE_ERROR_ << "Unsupported data format";
+                return expected<DataSetPtr>::Err(Status::invalid_args, "Failed to convert dataset to float");
+            }
+            
+            // Create normalized query dataset
+            auto [normalized_ds, norms] = CopyAndNormalizeDataset<float>(float_ds);
             normalized_query_dataset = normalized_ds;
             search_dataset = normalized_query_dataset;
         }
@@ -3220,7 +3227,7 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
                 LOG_KNOWHERE_ERROR_ << "Unsupported data format";
                 return Status::invalid_args;
             }
-            
+
             // Create a normalized copy for IVF_RABITQ using utility function
             auto [normalized_ds, norms] = CopyAndNormalizeDataset<float>(float_ds);
             normalized_dataset_for_ivf = normalized_ds;
