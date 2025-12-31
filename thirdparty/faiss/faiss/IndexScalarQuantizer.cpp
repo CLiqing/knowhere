@@ -31,7 +31,7 @@ IndexScalarQuantizer::IndexScalarQuantizer(
         ScalarQuantizer::QuantizerType qtype,
         MetricType metric)
         : IndexFlatCodes(0, d, metric), sq(d, qtype) {
-    if (qtype == ScalarQuantizer::QT_4bit_uniform && metric == METRIC_L2) {
+    if ((qtype == ScalarQuantizer::QT_4bit_uniform || qtype == ScalarQuantizer::QT_8bit_uniform) && metric == METRIC_L2) {
         sq.rangestat = ScalarQuantizer::RS_quantiles;
         sq.rangestat_arg = 0.01;
     }

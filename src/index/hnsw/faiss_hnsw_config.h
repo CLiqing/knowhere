@@ -57,7 +57,7 @@ class FaissHnswConfig : public BaseHnswConfig {
     bool
     WhetherAcceptableRefineType(const std::string& refine_type) {
         // 'flat' is identical to 'fp32'
-        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "fp16", "bf16", "fp32", "flat"};
+        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "sq8u", "fp16", "bf16", "fp32", "flat"};
         std::string refine_type_tolower = str_to_lower(refine_type);
 
         for (const auto& allowed : allowed_list) {
@@ -137,7 +137,7 @@ class FaissHnswSqConfig : public FaissHnswConfig {
     bool
     WhetherAcceptableQuantType(const std::string& sq_type) {
         // todo: add more
-        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "fp16", "bf16"};
+        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "sq8u", "fp16", "bf16"};
         std::string sq_type_tolower = str_to_lower(sq_type);
 
         for (const auto& allowed : allowed_list) {

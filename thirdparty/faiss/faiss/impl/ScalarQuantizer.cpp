@@ -107,7 +107,7 @@ void ScalarQuantizer::train(size_t n, const float* x) {
     int bit_per_dim = qtype == QT_4bit_uniform ? 4
             : qtype == QT_4bit                 ? 4
             : qtype == QT_6bit                 ? 6
-            : qtype == QT_8bit_uniform         ? 8
+            : qtype == QT_8bit_uniform         ? 7
             : qtype == QT_8bit                 ? 8
             : qtype == QT_1bit_direct          ? 1
                                                : -1;

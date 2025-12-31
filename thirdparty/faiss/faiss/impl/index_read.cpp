@@ -52,6 +52,7 @@
 #include <faiss/IndexRefine.h>
 #include <faiss/IndexRowwiseMinMax.h>
 #include <faiss/IndexSQ4Uniform.h>
+#include <faiss/IndexSQ8Uniform.h>
 #include <faiss/IndexScaNN.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetaIndexes.h>
@@ -1123,6 +1124,28 @@ Index* read_index(IOReader* f, int io_flags) {
         // Must deserialize l2_norms_sqr for IP distance computation
         READVECTOR(idxs->l2_norms_sqr);
         idx = idxs;
+    } else if (h == fourcc("IxSJ")) {
+        // IndexScalarQuantizer8bitUniformIP: SQ8Uniform + IP
+        IndexScalarQuantizer8bitUniformIP* idxs =
+                new IndexScalarQuantizer8bitUniformIP();
+        read_index_header(idxs, f);
+        read_ScalarQuantizer(&idxs->sq, f);
+        read_vector(idxs->codes, f);
+        idxs->code_size = idxs->sq.code_size;
+        // Must deserialize l2_norms_sqr for IP distance computation
+        READVECTOR(idxs->l2_norms_sqr);
+        idx = idxs;
+    } else if (h == fourcc("IxSK")) {
+        // IndexScalarQuantizer8bitUniformCosine: SQ8Uniform + COSINE
+        IndexScalarQuantizer8bitUniformCosine* idxs =
+                new IndexScalarQuantizer8bitUniformCosine();
+        read_index_header(idxs, f);
+        read_ScalarQuantizer(&idxs->sq, f);
+        read_vector(idxs->codes, f);
+        idxs->code_size = idxs->sq.code_size;
+        // Read inverse norms (needed for refine to work correctly)
+        READVECTOR(idxs->inverse_l2_norms);
+        idx = idxs;
     } else if (h == fourcc("IxS4")) {
         // IndexScalarQuantizer4bitUniformCosine: SQ4Uniform + COSINE
         IndexScalarQuantizer4bitUniformCosine* idxs =
@@ -1316,8 +1339,9 @@ Index* read_index(IOReader* f, int io_flags) {
     } else if (
             h == fourcc("IHNf") || h == fourcc("IHNp") || h == fourcc("IHNs") ||
             h == fourcc("IHN2") || h == fourcc("IHNc") || h == fourcc("IHN9") ||
-            h == fourcc("IHN8") || h == fourcc("IHNa") || h == fourcc("IHNb") ||
-            h == fourcc("IHN7") || h == fourcc("IHN6") || h == fourcc("IHN5")) {
+            h == fourcc("IHN8") || h == fourcc("IHNd") || h == fourcc("IHNe") ||
+            h == fourcc("IHNa") || h == fourcc("IHNb") || h == fourcc("IHN7") ||
+            h == fourcc("IHN6") || h == fourcc("IHN5")) {
         IndexHNSW* idxhnsw = nullptr;
         if (h == fourcc("IHNf"))
             idxhnsw = new IndexHNSWFlat();
@@ -1333,6 +1357,10 @@ Index* read_index(IOReader* f, int io_flags) {
             idxhnsw = new IndexHNSWFlatCosine();
         if (h == fourcc("IHN8"))
             idxhnsw = new IndexHNSWSQCosine();
+        if (h == fourcc("IHNd"))
+            idxhnsw = new IndexHNSWSQ8UniformCosine();
+        if (h == fourcc("IHNe"))
+            idxhnsw = new IndexHNSWSQ8UniformIP();
         if (h == fourcc("IHNa"))
             idxhnsw = new IndexHNSWSQ4UniformCosine();
         if (h == fourcc("IHNb"))

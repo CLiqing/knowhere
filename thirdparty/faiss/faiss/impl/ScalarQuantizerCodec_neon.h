@@ -141,6 +141,41 @@ struct QuantizerTemplate_neon<
     }
 };
 
+template <>
+struct QuantizerTemplate_neon<
+        Codec8bit_neon,
+        QuantizerTemplateScaling::UNIFORM,
+        8>
+        : public QuantizerTemplate<
+                  Codec8bit_neon,
+                  QuantizerTemplateScaling::UNIFORM,
+                  1> {
+    float final_scale;
+    float final_bias;
+
+    QuantizerTemplate_neon(size_t d, const std::vector<float>& trained)
+            : QuantizerTemplate<
+                      Codec8bit_neon,
+                      QuantizerTemplateScaling::UNIFORM,
+                      1>(d, trained) {
+        final_scale = this->vdiff / 255.0f;
+        final_bias = this->vmin + this->vdiff * 0.5f / 255.0f;
+    }
+
+    FAISS_ALWAYS_INLINE float32x4x2_t
+    reconstruct_8_components(const uint8_t* code, int i) const {
+        float32x4x2_t xi = Codec8bit_neon::decode_8_components(code, i);
+        return {vfmaq_f32(
+                        vdupq_n_f32(this->vmin),
+                        xi.val[0],
+                        vdupq_n_f32(this->vdiff)),
+                vfmaq_f32(
+                        vdupq_n_f32(this->vmin),
+                        xi.val[1],
+                        vdupq_n_f32(this->vdiff))};
+    }
+};
+
 template <class Codec>
 struct QuantizerTemplate_neon<Codec, QuantizerTemplateScaling::NON_UNIFORM, 1>
         : public QuantizerTemplate<Codec, QuantizerTemplateScaling::NON_UNIFORM, 1> {
@@ -613,6 +648,175 @@ struct DistanceComputerByte_neon<Similarity, 8> : SQDistanceComputer {
 };
 
 template <class Sim>
+struct DistanceComputerSQ8UByte_neon : SQDistanceComputer {
+    using Quantizer = QuantizerTemplate_neon<
+            Codec8bit_neon,
+            QuantizerTemplateScaling::UNIFORM,
+            8>;
+    using Similarity = Sim;
+
+    Quantizer quant;
+    std::vector<uint8_t> q_code;
+    float final_scale_sq;
+
+    DistanceComputerSQ8UByte_neon(size_t d, const std::vector<float>& trained)
+            : quant(d, trained),
+              q_code(d + 64, 0) {
+        final_scale_sq = quant.final_scale * quant.final_scale;
+    }
+
+    void set_query(const float* x) final {
+        float inv_scale = 1.0f / quant.final_scale;
+        float offset = quant.vmin;
+
+        for (size_t i = 0; i < quant.d; i++) {
+            float val = (x[i] - offset) * inv_scale;
+            int code = (int)std::floor(val);
+            if (code < 0)
+                code = 0;
+            if (code > 255)
+                code = 255;
+            q_code[i] = (uint8_t)code;
+        }
+    }
+
+    // Only computes L2 distance
+    float compute_distance(const float* x, const uint8_t* code) const {
+        return compute_distance_l2(code);
+    }
+
+    float query_to_code(const uint8_t* code) const override final {
+        return compute_distance_l2(code);
+    }
+
+    float compute_distance_l2(const uint8_t* code) const {
+        uint32x4_t acc = vdupq_n_u32(0);
+        const size_t d = quant.d;
+        const uint8_t* q_ptr = q_code.data();
+
+        size_t i = 0;
+        for (; i + 16 <= d; i += 16) {
+            uint8x16_t c = vld1q_u8(code + i);
+            uint8x16_t q = vld1q_u8(q_ptr + i);
+            uint8x16_t diff = vabdq_u8(c, q);
+
+            uint16x8_t sq_lo =
+                    vmull_u8(vget_low_u8(diff), vget_low_u8(diff));
+            uint16x8_t sq_hi =
+                    vmull_u8(vget_high_u8(diff), vget_high_u8(diff));
+
+            acc = vpadalq_u16(acc, sq_lo);
+            acc = vpadalq_u16(acc, sq_hi);
+        }
+
+        uint32_t result = vaddvq_u32(acc);
+
+        for (; i < d; i++) {
+            int diff = (int)q_code[i] - (int)code[i];
+            result += diff * diff;
+        }
+
+        return result * final_scale_sq;
+    }
+
+    float compute_code_distance_l2(const uint8_t* code1, const uint8_t* code2)
+            const {
+        uint32x4_t acc = vdupq_n_u32(0);
+        const size_t d = quant.d;
+
+        size_t i = 0;
+        for (; i + 16 <= d; i += 16) {
+            uint8x16_t c1 = vld1q_u8(code1 + i);
+            uint8x16_t c2 = vld1q_u8(code2 + i);
+            uint8x16_t diff = vabdq_u8(c1, c2);
+
+            uint16x8_t sq_lo =
+                    vmull_u8(vget_low_u8(diff), vget_low_u8(diff));
+            uint16x8_t sq_hi =
+                    vmull_u8(vget_high_u8(diff), vget_high_u8(diff));
+
+            acc = vpadalq_u16(acc, sq_lo);
+            acc = vpadalq_u16(acc, sq_hi);
+        }
+
+        uint32_t result = vaddvq_u32(acc);
+
+        for (; i < d; i++) {
+            int diff = (int)code1[i] - (int)code2[i];
+            result += diff * diff;
+        }
+
+        return result * final_scale_sq;
+    }
+
+    float symmetric_dis(idx_t i, idx_t j) override {
+        return compute_code_distance_l2(
+                codes + i * code_size, codes + j * code_size);
+    }
+
+    void query_to_codes_batch_4(
+            const uint8_t* __restrict code_0,
+            const uint8_t* __restrict code_1,
+            const uint8_t* __restrict code_2,
+            const uint8_t* __restrict code_3,
+            float& dis0,
+            float& dis1,
+            float& dis2,
+            float& dis3) const override final {
+        uint32x4_t acc0 = vdupq_n_u32(0);
+        uint32x4_t acc1 = vdupq_n_u32(0);
+        uint32x4_t acc2 = vdupq_n_u32(0);
+        uint32x4_t acc3 = vdupq_n_u32(0);
+
+        const size_t d = quant.d;
+        const uint8_t* q_ptr = q_code.data();
+
+        size_t i = 0;
+        for (; i + 16 <= d; i += 16) {
+            uint8x16_t q = vld1q_u8(q_ptr + i);
+
+            auto process = [&](const uint8_t* code, uint32x4_t& acc) {
+                uint8x16_t c = vld1q_u8(code + i);
+                uint8x16_t diff = vabdq_u8(c, q);
+                uint16x8_t sq_lo =
+                        vmull_u8(vget_low_u8(diff), vget_low_u8(diff));
+                uint16x8_t sq_hi =
+                        vmull_u8(vget_high_u8(diff), vget_high_u8(diff));
+                acc = vpadalq_u16(acc, sq_lo);
+                acc = vpadalq_u16(acc, sq_hi);
+            };
+
+            process(code_0, acc0);
+            process(code_1, acc1);
+            process(code_2, acc2);
+            process(code_3, acc3);
+        }
+
+        dis0 = vaddvq_u32(acc0);
+        dis1 = vaddvq_u32(acc1);
+        dis2 = vaddvq_u32(acc2);
+        dis3 = vaddvq_u32(acc3);
+
+        for (; i < d; i++) {
+            int q_val = (int)q_code[i];
+            auto process_scalar = [&](const uint8_t* code, float& dis) {
+                int diff = q_val - (int)code[i];
+                dis += diff * diff;
+            };
+            process_scalar(code_0, dis0);
+            process_scalar(code_1, dis1);
+            process_scalar(code_2, dis2);
+            process_scalar(code_3, dis3);
+        }
+
+        dis0 *= final_scale_sq;
+        dis1 *= final_scale_sq;
+        dis2 *= final_scale_sq;
+        dis3 *= final_scale_sq;
+    }
+};
+
+template <class Sim>
 struct DistanceComputerSQ4UByte_neon : SQDistanceComputer {
     using Quantizer = QuantizerTemplate_neon<
             Codec4bit_neon,
@@ -899,10 +1103,7 @@ SQDistanceComputer* select_distance_computer_neon(
     constexpr int SIMDWIDTH = Sim::simdwidth;
     switch (qtype) {
         case QuantizerType::QT_8bit_uniform:
-            return new DCTemplate_neon<
-                    QuantizerTemplate_neon<Codec8bit_neon, QuantizerTemplateScaling::UNIFORM, SIMDWIDTH>,
-                    Sim,
-                    SIMDWIDTH>(d, trained);
+            return new DistanceComputerSQ8UByte_neon<Sim>(d, trained);
 
         case QuantizerType::QT_4bit_uniform:
             return new DistanceComputerSQ4UByte_neon<Sim>(d, trained);
