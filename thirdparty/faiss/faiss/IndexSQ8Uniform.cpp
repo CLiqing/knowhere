@@ -12,14 +12,12 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-#include <faiss/IndexSQ4Uniform.h>
+#include <faiss/IndexSQ8Uniform.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <vector>
 
 #include <faiss/FaissHook.h>
 #include <faiss/impl/DistanceComputer.h>
@@ -30,15 +28,15 @@
 namespace faiss {
 
 //////////////////////////////////////////////////////////////////////////////////
-// SQ4UniformCosineDistanceComputer implementation
+// SQ8UniformCosineDistanceComputer implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-SQ4UniformCosineDistanceComputer::SQ4UniformCosineDistanceComputer(
+SQ8UniformCosineDistanceComputer::SQ8UniformCosineDistanceComputer(
         const int d_,
         std::unique_ptr<DistanceComputer>&& basedis_)
         : basedis(std::move(basedis_)), d(d_) {}
 
-void SQ4UniformCosineDistanceComputer::set_query(const float* x) {
+void SQ8UniformCosineDistanceComputer::set_query(const float* x) {
     // For COSINE metric, normalize query vector before computing distances
     // At this point, data has already been converted to float by knowhere layer
     query_storage.resize(d);
@@ -51,12 +49,12 @@ void SQ4UniformCosineDistanceComputer::set_query(const float* x) {
     basedis->set_query(query_storage.data());
 }
 
-float SQ4UniformCosineDistanceComputer::operator()(idx_t i) {
+float SQ8UniformCosineDistanceComputer::operator()(idx_t i) {
     float l2_sqr_dis = (*basedis)(i);
     return 1.0f - 0.5f * l2_sqr_dis;
 }
 
-void SQ4UniformCosineDistanceComputer::distances_batch_4(
+void SQ8UniformCosineDistanceComputer::distances_batch_4(
         const idx_t idx0,
         const idx_t idx1,
         const idx_t idx2,
@@ -73,22 +71,22 @@ void SQ4UniformCosineDistanceComputer::distances_batch_4(
     dis3 = 1.0f - 0.5f * dis3;
 }
 
-float SQ4UniformCosineDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
+float SQ8UniformCosineDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
     float l2_sqr_dis = basedis->symmetric_dis(i, j);
     return 1.0f - 0.5f * l2_sqr_dis;
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-// WithSQ4UniformNormIPDistanceComputer implementation
+// WithSQ8UniformNormIPDistanceComputer implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-WithSQ4UniformNormIPDistanceComputer::WithSQ4UniformNormIPDistanceComputer(
+WithSQ8UniformNormIPDistanceComputer::WithSQ8UniformNormIPDistanceComputer(
         const float* l2_norms_sqr_,
         const int d_,
         std::unique_ptr<DistanceComputer>&& basedis_)
         : basedis(std::move(basedis_)), l2_norms_sqr(l2_norms_sqr_), d(d_) {}
 
-void WithSQ4UniformNormIPDistanceComputer::set_query(const float* x) {
+void WithSQ8UniformNormIPDistanceComputer::set_query(const float* x) {
     if (x != nullptr) {
         // For IP: compute query norm squared for distance conversion
         query_norm_sqr = faiss::fvec_norm_L2sqr(x, d);
@@ -102,14 +100,14 @@ void WithSQ4UniformNormIPDistanceComputer::set_query(const float* x) {
     }
 }
 
-float WithSQ4UniformNormIPDistanceComputer::operator()(idx_t i) {
+float WithSQ8UniformNormIPDistanceComputer::operator()(idx_t i) {
     float l2_sqr_dis = (*basedis)(i);
     prefetch_L2(l2_norms_sqr + i);
     const float base_norm_sqr = l2_norms_sqr[i];
     return 0.5f * (query_norm_sqr + base_norm_sqr - l2_sqr_dis);
 }
 
-void WithSQ4UniformNormIPDistanceComputer::distances_batch_4(
+void WithSQ8UniformNormIPDistanceComputer::distances_batch_4(
         const idx_t idx0,
         const idx_t idx1,
         const idx_t idx2,
@@ -136,7 +134,7 @@ void WithSQ4UniformNormIPDistanceComputer::distances_batch_4(
     dis3 = 0.5f * (query_norm_sqr + base_norm_sqr3 - dis3);
 }
 
-float WithSQ4UniformNormIPDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
+float WithSQ8UniformNormIPDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
     float l2_sqr_dis = basedis->symmetric_dis(i, j);
 
     prefetch_L2(l2_norms_sqr + i);
@@ -149,14 +147,14 @@ float WithSQ4UniformNormIPDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-// IndexScalarQuantizer4bitUniformCosine implementation
+// IndexScalarQuantizer8bitUniformCosine implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-IndexScalarQuantizer4bitUniformCosine::IndexScalarQuantizer4bitUniformCosine(
+IndexScalarQuantizer8bitUniformCosine::IndexScalarQuantizer8bitUniformCosine(
         int d)
         : IndexScalarQuantizer(
                   d,
-                  ScalarQuantizer::QT_4bit_uniform,
+                  ScalarQuantizer::QT_8bit_uniform,
                   METRIC_INNER_PRODUCT) {
     is_cosine = true;
 
@@ -164,7 +162,7 @@ IndexScalarQuantizer4bitUniformCosine::IndexScalarQuantizer4bitUniformCosine(
     sq.rangestat_arg = 0.01;
 }
 
-IndexScalarQuantizer4bitUniformCosine::IndexScalarQuantizer4bitUniformCosine()
+IndexScalarQuantizer8bitUniformCosine::IndexScalarQuantizer8bitUniformCosine()
         : IndexScalarQuantizer() {
     metric_type = METRIC_INNER_PRODUCT;
     is_cosine = true;
@@ -173,7 +171,7 @@ IndexScalarQuantizer4bitUniformCosine::IndexScalarQuantizer4bitUniformCosine()
     sq.rangestat_arg = 0.01;
 }
 
-void IndexScalarQuantizer4bitUniformCosine::train(idx_t n, const float* x) {
+void IndexScalarQuantizer8bitUniformCosine::train(idx_t n, const float* x) {
     // For COSINE metric, normalize vectors before training
     // Use knowhere's CopyAndNormalizeVecs to avoid modifying input data
     auto normalized_data = knowhere::CopyAndNormalizeVecs<float>(x, n, d);
@@ -183,7 +181,7 @@ void IndexScalarQuantizer4bitUniformCosine::train(idx_t n, const float* x) {
     is_trained = true;
 }
 
-void IndexScalarQuantizer4bitUniformCosine::add(idx_t n, const float* x) {
+void IndexScalarQuantizer8bitUniformCosine::add(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT(is_trained);
 
     // For COSINE metric, normalize vectors before adding
@@ -206,15 +204,15 @@ void IndexScalarQuantizer4bitUniformCosine::add(idx_t n, const float* x) {
     }
 }
 
-DistanceComputer* IndexScalarQuantizer4bitUniformCosine::get_distance_computer()
+DistanceComputer* IndexScalarQuantizer8bitUniformCosine::get_distance_computer()
         const {
     std::unique_ptr<DistanceComputer> base_dc(
             IndexScalarQuantizer::get_distance_computer());
 
-    return new SQ4UniformCosineDistanceComputer(d, std::move(base_dc));
+    return new SQ8UniformCosineDistanceComputer(d, std::move(base_dc));
 }
 
-const float* IndexScalarQuantizer4bitUniformCosine::get_inverse_l2_norms()
+const float* IndexScalarQuantizer8bitUniformCosine::get_inverse_l2_norms()
         const {
     // Ensure cache is sized correctly
     if (inverse_l2_norms.size() != static_cast<size_t>(ntotal)) {
@@ -223,30 +221,30 @@ const float* IndexScalarQuantizer4bitUniformCosine::get_inverse_l2_norms()
     return inverse_l2_norms.data();
 }
 
-void IndexScalarQuantizer4bitUniformCosine::reset() {
+void IndexScalarQuantizer8bitUniformCosine::reset() {
     IndexScalarQuantizer::reset();
     inverse_l2_norms.clear();
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-// IndexScalarQuantizer4bitUniformIP implementation
+// IndexScalarQuantizer8bitUniformIP implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-IndexScalarQuantizer4bitUniformIP::IndexScalarQuantizer4bitUniformIP(int d)
+IndexScalarQuantizer8bitUniformIP::IndexScalarQuantizer8bitUniformIP(int d)
         : IndexScalarQuantizer(
                   d,
-                  ScalarQuantizer::QT_4bit_uniform,
+                  ScalarQuantizer::QT_8bit_uniform,
                   METRIC_INNER_PRODUCT) {
     is_cosine = false;
 }
 
-IndexScalarQuantizer4bitUniformIP::IndexScalarQuantizer4bitUniformIP()
+IndexScalarQuantizer8bitUniformIP::IndexScalarQuantizer8bitUniformIP()
         : IndexScalarQuantizer() {
     metric_type = METRIC_INNER_PRODUCT;
     is_cosine = false;
 }
 
-void IndexScalarQuantizer4bitUniformIP::add(idx_t n, const float* x) {
+void IndexScalarQuantizer8bitUniformIP::add(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT(is_trained);
     IndexScalarQuantizer::add(n, x);
 
@@ -258,40 +256,40 @@ void IndexScalarQuantizer4bitUniformIP::add(idx_t n, const float* x) {
     }
 }
 
-void IndexScalarQuantizer4bitUniformIP::reset() {
+void IndexScalarQuantizer8bitUniformIP::reset() {
     IndexScalarQuantizer::reset();
     l2_norms_sqr.clear();
 }
 
-DistanceComputer* IndexScalarQuantizer4bitUniformIP::get_distance_computer()
+DistanceComputer* IndexScalarQuantizer8bitUniformIP::get_distance_computer()
         const {
     std::unique_ptr<DistanceComputer> base_dc(
             IndexScalarQuantizer::get_distance_computer());
 
-    return new WithSQ4UniformNormIPDistanceComputer(
+    return new WithSQ8UniformNormIPDistanceComputer(
             get_l2_norms_sqr(), d, std::move(base_dc));
 }
 
-const float* IndexScalarQuantizer4bitUniformIP::get_l2_norms_sqr() const {
+const float* IndexScalarQuantizer8bitUniformIP::get_l2_norms_sqr() const {
     return l2_norms_sqr.data();
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-// IndexHNSWSQ4UniformCosine implementation
+// IndexHNSWSQ8UniformCosine implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-IndexHNSWSQ4UniformCosine::IndexHNSWSQ4UniformCosine() : IndexHNSW() {
+IndexHNSWSQ8UniformCosine::IndexHNSWSQ8UniformCosine() : IndexHNSW() {
     is_cosine = true;
 }
 
-IndexHNSWSQ4UniformCosine::IndexHNSWSQ4UniformCosine(
+IndexHNSWSQ8UniformCosine::IndexHNSWSQ8UniformCosine(
         int d,
         ScalarQuantizer::QuantizerType qtype,
         int M)
-        : IndexHNSW(new IndexScalarQuantizer4bitUniformCosine(d), M) {
+        : IndexHNSW(new IndexScalarQuantizer8bitUniformCosine(d), M) {
     FAISS_THROW_IF_NOT_MSG(
-            qtype == ScalarQuantizer::QT_4bit_uniform,
-            "IndexHNSWSQ4UniformCosine only supports QT_4bit_uniform");
+            qtype == ScalarQuantizer::QT_8bit_uniform,
+            "IndexHNSWSQ8UniformCosine only supports QT_8bit_uniform");
 
     is_trained = this->storage->is_trained;
     own_fields = true;
@@ -299,21 +297,21 @@ IndexHNSWSQ4UniformCosine::IndexHNSWSQ4UniformCosine(
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-// IndexHNSWSQ4UniformIP implementation
+// IndexHNSWSQ8UniformIP implementation
 //////////////////////////////////////////////////////////////////////////////////
 
-IndexHNSWSQ4UniformIP::IndexHNSWSQ4UniformIP() : IndexHNSW() {
+IndexHNSWSQ8UniformIP::IndexHNSWSQ8UniformIP() : IndexHNSW() {
     is_cosine = false;
 }
 
-IndexHNSWSQ4UniformIP::IndexHNSWSQ4UniformIP(
+IndexHNSWSQ8UniformIP::IndexHNSWSQ8UniformIP(
         int d,
         ScalarQuantizer::QuantizerType qtype,
         int M)
-        : IndexHNSW(new IndexScalarQuantizer4bitUniformIP(d), M) {
+        : IndexHNSW(new IndexScalarQuantizer8bitUniformIP(d), M) {
     FAISS_THROW_IF_NOT_MSG(
-            qtype == ScalarQuantizer::QT_4bit_uniform,
-            "IndexHNSWSQ4UniformIP only supports QT_4bit_uniform");
+            qtype == ScalarQuantizer::QT_8bit_uniform,
+            "IndexHNSWSQ8UniformIP only supports QT_8bit_uniform");
 
     is_trained = this->storage->is_trained;
     own_fields = true;

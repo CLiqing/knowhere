@@ -51,6 +51,7 @@
 #include <faiss/IndexRefine.h>
 #include <faiss/IndexRowwiseMinMax.h>
 #include <faiss/IndexSQ4Uniform.h>
+#include <faiss/IndexSQ8Uniform.h>
 #include <faiss/IndexScaNN.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetaIndexes.h>
@@ -751,6 +752,33 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
         WRITE1(idxp_2->code_size);
         WRITEVECTOR(idxp_2->codes);
     } else if (
+            const IndexScalarQuantizer8bitUniformIP* idxs =
+                    dynamic_cast<const IndexScalarQuantizer8bitUniformIP*>(
+                            idx)) {
+        // IndexScalarQuantizer8bitUniformIP: SQ8Uniform + IP
+        // Must be checked BEFORE IndexScalarQuantizer8bitUniformCosine and
+        // IndexScalarQuantizer (parent classes)
+        uint32_t h = fourcc("IxSJ");
+        WRITE1(h);
+        write_index_header(idx, f);
+        write_ScalarQuantizer(&idxs->sq, f);
+        WRITEVECTOR(idxs->codes);
+        // Must serialize l2_norms_sqr for IP distance computation
+        WRITEVECTOR(idxs->l2_norms_sqr);
+    } else if (
+            const IndexScalarQuantizer8bitUniformCosine* idxs =
+                    dynamic_cast<const IndexScalarQuantizer8bitUniformCosine*>(
+                            idx)) {
+        // IndexScalarQuantizer8bitUniformCosine: SQ8Uniform + COSINE
+        // Must be checked BEFORE IndexScalarQuantizerCosine (parent class)
+        uint32_t h = fourcc("IxSK");
+        WRITE1(h);
+        write_index_header(idx, f);
+        write_ScalarQuantizer(&idxs->sq, f);
+        WRITEVECTOR(idxs->codes);
+        // inverse norms (needed for refine to work correctly)
+        WRITEVECTOR(idxs->inverse_l2_norms);
+    } else if (
             const IndexScalarQuantizer4bitUniformIP* idxs =
                     dynamic_cast<const IndexScalarQuantizer4bitUniformIP*>(
                             idx)) {
@@ -977,6 +1005,10 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
                 : dynamic_cast<const IndexHNSWCagra*>(idx)      ? fourcc("IHNc")
                 : dynamic_cast<const IndexHNSWFlatCosine*>(idx) ? fourcc("IHN9")
                 : dynamic_cast<const IndexHNSWSQCosine*>(idx)   ? fourcc("IHN8")
+                : dynamic_cast<const IndexHNSWSQ8UniformCosine*>(idx)
+                ? fourcc("IHNd")
+                : dynamic_cast<const IndexHNSWSQ8UniformIP*>(idx)
+                ? fourcc("IHNe")
                 : dynamic_cast<const IndexHNSWSQ4UniformCosine*>(idx)
                 ? fourcc("IHNa")
                 : dynamic_cast<const IndexHNSWSQ4UniformIP*>(idx)

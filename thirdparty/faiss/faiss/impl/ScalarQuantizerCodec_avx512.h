@@ -1229,6 +1229,288 @@ struct DistanceComputerSQ4UByte_avx512 : SQDistanceComputer {
     }
 };
 
+template <class Similarity>
+struct DistanceComputerSQ8UByte_avx512 : SQDistanceComputer {
+    using Quantizer = QuantizerTemplate_avx512<
+            Codec8bit_avx512,
+            QuantizerTemplateScaling::UNIFORM,
+            16>;
+    using Sim = Similarity;
+
+    Quantizer quant;
+    std::vector<uint8_t> q_codes;
+    float final_scale_sq;
+
+    DistanceComputerSQ8UByte_avx512(size_t d, const std::vector<float>& trained)
+            : quant(d, trained),
+              q_codes(d + 64, 0) {
+        final_scale_sq = quant.vdiff * quant.vdiff / (255.0f * 255.0f);
+    }
+
+    void set_query(const float* x) final {
+        float inv_scale = 255.0f / quant.vdiff;
+        float offset = quant.vmin;
+
+        for (size_t i = 0; i < quant.d; i++) {
+            float val = (x[i] - offset) * inv_scale;
+            int code = (int)std::floor(val);
+            if (code < 0)
+                code = 0;
+            if (code > 255)
+                code = 255;
+            q_codes[i] = (uint8_t)code;
+        }
+    }
+
+    float compute_distance(const float* x, const uint8_t* code) const {
+        return compute_distance_l2(code);
+    }
+
+    float compute_distance_l2(const uint8_t* code) const {
+        __m512i acc = _mm512_setzero_si512();
+        const size_t d = quant.d;
+        const uint8_t* q_ptr = q_codes.data();
+
+        size_t i = 0;
+        for (; i + 64 <= d; i += 64) {
+            __m512i c_vec = _mm512_loadu_si512((const __m512i*)(code + i));
+            __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
+
+            __m256i c_lo_256 = _mm512_castsi512_si256(c_vec);
+            __m256i c_hi_256 = _mm512_extracti64x4_epi64(c_vec, 1);
+            __m256i q_lo_256 = _mm512_castsi512_si256(q_vec);
+            __m256i q_hi_256 = _mm512_extracti64x4_epi64(q_vec, 1);
+
+            __m512i c_lo_16 = _mm512_cvtepu8_epi16(c_lo_256);
+            __m512i c_hi_16 = _mm512_cvtepu8_epi16(c_hi_256);
+            __m512i q_lo_16 = _mm512_cvtepu8_epi16(q_lo_256);
+            __m512i q_hi_16 = _mm512_cvtepu8_epi16(q_hi_256);
+
+            __m512i diff_lo = _mm512_sub_epi16(q_lo_16, c_lo_16);
+            __m512i diff_hi = _mm512_sub_epi16(q_hi_16, c_hi_16);
+
+            __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+            __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+            acc = _mm512_add_epi32(acc, sq_lo);
+            acc = _mm512_add_epi32(acc, sq_hi);
+        }
+
+        if (i < d) {
+            size_t rem = d - i;
+            uint64_t mask = (rem >= 64) ? -1ULL : (1ULL << rem) - 1;
+
+            __m512i c_vec = _mm512_maskz_loadu_epi8(mask, code + i);
+            __m512i q_vec = _mm512_maskz_loadu_epi8(mask, q_ptr + i);
+
+            __m256i c_lo_256 = _mm512_castsi512_si256(c_vec);
+            __m256i c_hi_256 = _mm512_extracti64x4_epi64(c_vec, 1);
+            __m256i q_lo_256 = _mm512_castsi512_si256(q_vec);
+            __m256i q_hi_256 = _mm512_extracti64x4_epi64(q_vec, 1);
+
+            __m512i c_lo_16 = _mm512_cvtepu8_epi16(c_lo_256);
+            __m512i c_hi_16 = _mm512_cvtepu8_epi16(c_hi_256);
+            __m512i q_lo_16 = _mm512_cvtepu8_epi16(q_lo_256);
+            __m512i q_hi_16 = _mm512_cvtepu8_epi16(q_hi_256);
+
+            __m512i diff_lo = _mm512_sub_epi16(q_lo_16, c_lo_16);
+            __m512i diff_hi = _mm512_sub_epi16(q_hi_16, c_hi_16);
+
+            __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+            __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+            acc = _mm512_add_epi32(acc, sq_lo);
+            acc = _mm512_add_epi32(acc, sq_hi);
+        }
+
+        int32_t sum = _mm512_reduce_add_epi32(acc);
+        return sum * final_scale_sq;
+    }
+
+    float compute_code_distance_l2(const uint8_t* code1, const uint8_t* code2)
+            const {
+        __m512i acc = _mm512_setzero_si512();
+        const size_t d = quant.d;
+
+        size_t i = 0;
+        for (; i + 64 <= d; i += 64) {
+            __m512i c1_vec = _mm512_loadu_si512((const __m512i*)(code1 + i));
+            __m512i c2_vec = _mm512_loadu_si512((const __m512i*)(code2 + i));
+
+            __m256i c1_lo_256 = _mm512_castsi512_si256(c1_vec);
+            __m256i c1_hi_256 = _mm512_extracti64x4_epi64(c1_vec, 1);
+            __m256i c2_lo_256 = _mm512_castsi512_si256(c2_vec);
+            __m256i c2_hi_256 = _mm512_extracti64x4_epi64(c2_vec, 1);
+
+            __m512i c1_lo_16 = _mm512_cvtepu8_epi16(c1_lo_256);
+            __m512i c1_hi_16 = _mm512_cvtepu8_epi16(c1_hi_256);
+            __m512i c2_lo_16 = _mm512_cvtepu8_epi16(c2_lo_256);
+            __m512i c2_hi_16 = _mm512_cvtepu8_epi16(c2_hi_256);
+
+            __m512i diff_lo = _mm512_sub_epi16(c1_lo_16, c2_lo_16);
+            __m512i diff_hi = _mm512_sub_epi16(c1_hi_16, c2_hi_16);
+
+            __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+            __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+            acc = _mm512_add_epi32(acc, sq_lo);
+            acc = _mm512_add_epi32(acc, sq_hi);
+        }
+
+        if (i < d) {
+            size_t rem = d - i;
+            uint64_t mask = (rem >= 64) ? -1ULL : (1ULL << rem) - 1;
+
+            __m512i c1_vec = _mm512_maskz_loadu_epi8(mask, code1 + i);
+            __m512i c2_vec = _mm512_maskz_loadu_epi8(mask, code2 + i);
+
+            __m256i c1_lo_256 = _mm512_castsi512_si256(c1_vec);
+            __m256i c1_hi_256 = _mm512_extracti64x4_epi64(c1_vec, 1);
+            __m256i c2_lo_256 = _mm512_castsi512_si256(c2_vec);
+            __m256i c2_hi_256 = _mm512_extracti64x4_epi64(c2_vec, 1);
+
+            __m512i c1_lo_16 = _mm512_cvtepu8_epi16(c1_lo_256);
+            __m512i c1_hi_16 = _mm512_cvtepu8_epi16(c1_hi_256);
+            __m512i c2_lo_16 = _mm512_cvtepu8_epi16(c2_lo_256);
+            __m512i c2_hi_16 = _mm512_cvtepu8_epi16(c2_hi_256);
+
+            __m512i diff_lo = _mm512_sub_epi16(c1_lo_16, c2_lo_16);
+            __m512i diff_hi = _mm512_sub_epi16(c1_hi_16, c2_hi_16);
+
+            __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+            __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+            acc = _mm512_add_epi32(acc, sq_lo);
+            acc = _mm512_add_epi32(acc, sq_hi);
+        }
+
+        int32_t sum = _mm512_reduce_add_epi32(acc);
+        return sum * final_scale_sq;
+    }
+
+    float operator()(idx_t i) final {
+        return compute_distance(nullptr, codes + i * code_size);
+    }
+
+    float symmetric_dis(idx_t i, idx_t j) override {
+        return compute_code_distance_l2(
+                codes + i * code_size, codes + j * code_size);
+    }
+
+    float query_to_code(const uint8_t* code) const override final {
+        return compute_distance(nullptr, code);
+    }
+
+    __attribute__((target("avx512vnni"))) void query_to_codes_batch_4(
+            const uint8_t* __restrict code_0,
+            const uint8_t* __restrict code_1,
+            const uint8_t* __restrict code_2,
+            const uint8_t* __restrict code_3,
+            float& dis0,
+            float& dis1,
+            float& dis2,
+            float& dis3) const override final {
+        __m512i acc0 = _mm512_setzero_si512();
+        __m512i acc1 = _mm512_setzero_si512();
+        __m512i acc2 = _mm512_setzero_si512();
+        __m512i acc3 = _mm512_setzero_si512();
+
+        const size_t d = quant.d;
+        const uint8_t* q_ptr = q_codes.data();
+
+        size_t i = 0;
+        for (; i + 64 <= d; i += 64) {
+            __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
+            __m256i q_lo_256 = _mm512_castsi512_si256(q_vec);
+            __m256i q_hi_256 = _mm512_extracti64x4_epi64(q_vec, 1);
+            __m512i q_lo_16 = _mm512_cvtepu8_epi16(q_lo_256);
+            __m512i q_hi_16 = _mm512_cvtepu8_epi16(q_hi_256);
+
+            auto process = [&](const uint8_t* code, __m512i& acc) {
+                __m512i c_vec = _mm512_loadu_si512((const __m512i*)(code + i));
+                __m256i c_lo_256 = _mm512_castsi512_si256(c_vec);
+                __m256i c_hi_256 = _mm512_extracti64x4_epi64(c_vec, 1);
+
+                __m512i c_lo_16 = _mm512_cvtepu8_epi16(c_lo_256);
+                __m512i c_hi_16 = _mm512_cvtepu8_epi16(c_hi_256);
+
+                __m512i diff_lo = _mm512_sub_epi16(q_lo_16, c_lo_16);
+                __m512i diff_hi = _mm512_sub_epi16(q_hi_16, c_hi_16);
+
+                __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+                __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+                acc = _mm512_add_epi32(acc, sq_lo);
+                acc = _mm512_add_epi32(acc, sq_hi);
+            };
+
+            process(code_0, acc0);
+            process(code_1, acc1);
+            process(code_2, acc2);
+            process(code_3, acc3);
+        }
+
+        if (i < d) {
+            size_t rem = d - i;
+            uint64_t mask = (rem >= 64) ? -1ULL : (1ULL << rem) - 1;
+
+            __m512i q_vec = _mm512_maskz_loadu_epi8(mask, q_ptr + i);
+            __m256i q_lo_256 = _mm512_castsi512_si256(q_vec);
+            __m256i q_hi_256 = _mm512_extracti64x4_epi64(q_vec, 1);
+            __m512i q_lo_16 = _mm512_cvtepu8_epi16(q_lo_256);
+            __m512i q_hi_16 = _mm512_cvtepu8_epi16(q_hi_256);
+
+            auto process = [&](const uint8_t* code, __m512i& acc) {
+                __m512i c_vec = _mm512_maskz_loadu_epi8(mask, code + i);
+                __m256i c_lo_256 = _mm512_castsi512_si256(c_vec);
+                __m256i c_hi_256 = _mm512_extracti64x4_epi64(c_vec, 1);
+
+                __m512i c_lo_16 = _mm512_cvtepu8_epi16(c_lo_256);
+                __m512i c_hi_16 = _mm512_cvtepu8_epi16(c_hi_256);
+
+                __m512i diff_lo = _mm512_sub_epi16(q_lo_16, c_lo_16);
+                __m512i diff_hi = _mm512_sub_epi16(q_hi_16, c_hi_16);
+
+                __m512i sq_lo = _mm512_madd_epi16(diff_lo, diff_lo);
+                __m512i sq_hi = _mm512_madd_epi16(diff_hi, diff_hi);
+
+                acc = _mm512_add_epi32(acc, sq_lo);
+                acc = _mm512_add_epi32(acc, sq_hi);
+            };
+
+            process(code_0, acc0);
+            process(code_1, acc1);
+            process(code_2, acc2);
+            process(code_3, acc3);
+        }
+
+        dis0 = _mm512_reduce_add_epi32(acc0) * final_scale_sq;
+        dis1 = _mm512_reduce_add_epi32(acc1) * final_scale_sq;
+        dis2 = _mm512_reduce_add_epi32(acc2) * final_scale_sq;
+        dis3 = _mm512_reduce_add_epi32(acc3) * final_scale_sq;
+    }
+
+    void distances_batch_4(
+            const idx_t idx0,
+            const idx_t idx1,
+            const idx_t idx2,
+            const idx_t idx3,
+            float& dis0,
+            float& dis1,
+            float& dis2,
+            float& dis3) override {
+        query_to_codes_batch_4(
+                codes + idx0 * code_size,
+                codes + idx1 * code_size,
+                codes + idx2 * code_size,
+                codes + idx3 * code_size,
+                dis0,
+                dis1,
+                dis2,
+                dis3);
+    }
+};
+
 /*******************************************************************
  * DistanceComputerByte: computes distances in the integer domain
  *******************************************************************/
@@ -1327,10 +1609,7 @@ SQDistanceComputer* select_distance_computer_avx512(
     const bool use_vnni = __builtin_cpu_supports("avx512vnni");
     switch (qtype) {
         case QuantizerType::QT_8bit_uniform:
-            return new DCTemplate_avx512<
-                    QuantizerTemplate_avx512<Codec8bit_avx512, QuantizerTemplateScaling::UNIFORM, SIMDWIDTH>,
-                    Sim,
-                    SIMDWIDTH>(d, trained);
+            return new DistanceComputerSQ8UByte_avx512<Sim>(d, trained);
 
         case QuantizerType::QT_4bit_uniform:
             if (use_vnni) {
