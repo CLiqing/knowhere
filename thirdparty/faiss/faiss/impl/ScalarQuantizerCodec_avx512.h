@@ -1334,6 +1334,28 @@ struct DistanceComputerSQ7UByte_avx512 : SQDistanceComputer {
         const uint8_t* q_ptr = q_codes.data();
 
         size_t i = 0;
+        for (; i + 256 <= d; i += 256) {
+            __m512i c0 = _mm512_loadu_si512((const __m512i*)(code + i));
+            __m512i q0 = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
+            __m512i diff0 = _mm512_abs_epi8(_mm512_sub_epi8(c0, q0));
+            acc = _mm512_dpbusd_epi32(acc, diff0, diff0);
+
+            __m512i c1 = _mm512_loadu_si512((const __m512i*)(code + i + 64));
+            __m512i q1 = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 64));
+            __m512i diff1 = _mm512_abs_epi8(_mm512_sub_epi8(c1, q1));
+            acc = _mm512_dpbusd_epi32(acc, diff1, diff1);
+
+            __m512i c2 = _mm512_loadu_si512((const __m512i*)(code + i + 128));
+            __m512i q2 = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 128));
+            __m512i diff2 = _mm512_abs_epi8(_mm512_sub_epi8(c2, q2));
+            acc = _mm512_dpbusd_epi32(acc, diff2, diff2);
+
+            __m512i c3 = _mm512_loadu_si512((const __m512i*)(code + i + 192));
+            __m512i q3 = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 192));
+            __m512i diff3 = _mm512_abs_epi8(_mm512_sub_epi8(c3, q3));
+            acc = _mm512_dpbusd_epi32(acc, diff3, diff3);
+        }
+
         for (; i + 64 <= d; i += 64) {
             __m512i c_vec = _mm512_loadu_si512((const __m512i*)(code + i));
             __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
@@ -1573,6 +1595,81 @@ struct DistanceComputerSQ7UByte_avx512 : SQDistanceComputer {
         const uint8_t* q_ptr = q_codes.data();
 
         size_t i = 0;
+        for (; i + 256 <= d; i += 256) {
+            // Chunk 0
+            {
+                __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
+                __m512i c0 = _mm512_loadu_si512((const __m512i*)(code_0 + i));
+                __m512i c1 = _mm512_loadu_si512((const __m512i*)(code_1 + i));
+                __m512i c2 = _mm512_loadu_si512((const __m512i*)(code_2 + i));
+                __m512i c3 = _mm512_loadu_si512((const __m512i*)(code_3 + i));
+
+                __m512i d0 = _mm512_abs_epi8(_mm512_sub_epi8(c0, q_vec));
+                __m512i d1 = _mm512_abs_epi8(_mm512_sub_epi8(c1, q_vec));
+                __m512i d2 = _mm512_abs_epi8(_mm512_sub_epi8(c2, q_vec));
+                __m512i d3 = _mm512_abs_epi8(_mm512_sub_epi8(c3, q_vec));
+
+                acc0 = _mm512_dpbusd_epi32(acc0, d0, d0);
+                acc1 = _mm512_dpbusd_epi32(acc1, d1, d1);
+                acc2 = _mm512_dpbusd_epi32(acc2, d2, d2);
+                acc3 = _mm512_dpbusd_epi32(acc3, d3, d3);
+            }
+            // Chunk 1
+            {
+                __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 64));
+                __m512i c0 = _mm512_loadu_si512((const __m512i*)(code_0 + i + 64));
+                __m512i c1 = _mm512_loadu_si512((const __m512i*)(code_1 + i + 64));
+                __m512i c2 = _mm512_loadu_si512((const __m512i*)(code_2 + i + 64));
+                __m512i c3 = _mm512_loadu_si512((const __m512i*)(code_3 + i + 64));
+
+                __m512i d0 = _mm512_abs_epi8(_mm512_sub_epi8(c0, q_vec));
+                __m512i d1 = _mm512_abs_epi8(_mm512_sub_epi8(c1, q_vec));
+                __m512i d2 = _mm512_abs_epi8(_mm512_sub_epi8(c2, q_vec));
+                __m512i d3 = _mm512_abs_epi8(_mm512_sub_epi8(c3, q_vec));
+
+                acc0 = _mm512_dpbusd_epi32(acc0, d0, d0);
+                acc1 = _mm512_dpbusd_epi32(acc1, d1, d1);
+                acc2 = _mm512_dpbusd_epi32(acc2, d2, d2);
+                acc3 = _mm512_dpbusd_epi32(acc3, d3, d3);
+            }
+            // Chunk 2
+            {
+                __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 128));
+                __m512i c0 = _mm512_loadu_si512((const __m512i*)(code_0 + i + 128));
+                __m512i c1 = _mm512_loadu_si512((const __m512i*)(code_1 + i + 128));
+                __m512i c2 = _mm512_loadu_si512((const __m512i*)(code_2 + i + 128));
+                __m512i c3 = _mm512_loadu_si512((const __m512i*)(code_3 + i + 128));
+
+                __m512i d0 = _mm512_abs_epi8(_mm512_sub_epi8(c0, q_vec));
+                __m512i d1 = _mm512_abs_epi8(_mm512_sub_epi8(c1, q_vec));
+                __m512i d2 = _mm512_abs_epi8(_mm512_sub_epi8(c2, q_vec));
+                __m512i d3 = _mm512_abs_epi8(_mm512_sub_epi8(c3, q_vec));
+
+                acc0 = _mm512_dpbusd_epi32(acc0, d0, d0);
+                acc1 = _mm512_dpbusd_epi32(acc1, d1, d1);
+                acc2 = _mm512_dpbusd_epi32(acc2, d2, d2);
+                acc3 = _mm512_dpbusd_epi32(acc3, d3, d3);
+            }
+            // Chunk 3
+            {
+                __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i + 192));
+                __m512i c0 = _mm512_loadu_si512((const __m512i*)(code_0 + i + 192));
+                __m512i c1 = _mm512_loadu_si512((const __m512i*)(code_1 + i + 192));
+                __m512i c2 = _mm512_loadu_si512((const __m512i*)(code_2 + i + 192));
+                __m512i c3 = _mm512_loadu_si512((const __m512i*)(code_3 + i + 192));
+
+                __m512i d0 = _mm512_abs_epi8(_mm512_sub_epi8(c0, q_vec));
+                __m512i d1 = _mm512_abs_epi8(_mm512_sub_epi8(c1, q_vec));
+                __m512i d2 = _mm512_abs_epi8(_mm512_sub_epi8(c2, q_vec));
+                __m512i d3 = _mm512_abs_epi8(_mm512_sub_epi8(c3, q_vec));
+
+                acc0 = _mm512_dpbusd_epi32(acc0, d0, d0);
+                acc1 = _mm512_dpbusd_epi32(acc1, d1, d1);
+                acc2 = _mm512_dpbusd_epi32(acc2, d2, d2);
+                acc3 = _mm512_dpbusd_epi32(acc3, d3, d3);
+            }
+        }
+
         for (; i + 64 <= d; i += 64) {
             __m512i q_vec = _mm512_loadu_si512((const __m512i*)(q_ptr + i));
 
