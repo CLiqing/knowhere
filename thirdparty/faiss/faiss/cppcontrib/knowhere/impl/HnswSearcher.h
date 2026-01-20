@@ -390,8 +390,13 @@ struct v2_hnsw_searcher {
         graph_visitor.visit_level(0);
 
         // initialize the container for candidates
+        // 当前方案：对所有索引都使用分离容量设计
+        // TODO: 需要找到更好的方法来检测 SQ4U 索引类型
+        // - n_candidates (max(ef, k)): 控制结果集大小
+        // - search_capacity (ef): 控制候选集大小
         const idx_t n_candidates = std::max((idx_t)efSearch, k);
-        knowhere::NeighborSetDoublePopList retset(n_candidates);
+        const idx_t search_capacity = efSearch;
+        knowhere::NeighborSetDoublePopList retset(n_candidates, search_capacity);
 
         // initialize retset with a single 'nearest' point
         {

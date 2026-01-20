@@ -64,7 +64,11 @@ class NeighborSetPopList {
     }
 
  public:
-    explicit NeighborSetPopList(size_t capacity) : capacity_(capacity), data_(capacity + 1) {}
+    explicit NeighborSetPopList(size_t capacity) 
+        : capacity_(capacity), search_capacity_(capacity), data_(capacity + 1) {}
+
+    explicit NeighborSetPopList(size_t capacity, size_t search_capacity)
+        : capacity_(capacity), search_capacity_(search_capacity), data_(capacity + 1) {}
 
     inline bool
     insert(const Neighbor nbr, IteratorMinHeap* disqualified = nullptr) {
@@ -75,13 +79,31 @@ class NeighborSetPopList {
             }
             return false;
         }
-        if (size_ == capacity_ && disqualified) {
-            disqualified->push(data_[size_ - 1]);
+
+        bool has_discarded = false;
+        Neighbor discarded;
+        if (size_ == capacity_) {
+            has_discarded = true;
+            discarded = data_[size_ - 1];
+            if (disqualified) {
+                disqualified->push(discarded);
+            }
         }
         insert_helper(nbr, pos);
         if constexpr (need_save) {
             if (pos < cur_) {
                 cur_ = pos;
+            }
+
+            if (size_ == capacity_) {
+                if (!has_discarded) {
+                    init_candidate_set();
+                } else {
+                    if (discarded.status == Neighbor::kChecked) {
+                        unchecked_count_++;
+                        update_candidate_set();
+                    }
+                }
             }
         }
         return true;
@@ -140,6 +162,7 @@ class NeighborSetPopList {
     clear() {
         size_ = 0;
         cur_ = 0;
+        unchecked_count_ = 0;
     }
 
     inline const Neighbor&
@@ -148,8 +171,45 @@ class NeighborSetPopList {
     }
 
  private:
+    void
+    init_candidate_set() {
+        unchecked_count_ = 0;
+        cur_ = size_;
+
+        for (size_t i = 0; i < size_; i++) {
+            if (data_[i].status != Neighbor::kChecked) {
+                if (unchecked_count_ == search_capacity_) {
+                    data_[i].status = Neighbor::kChecked;
+                } else {
+                    unchecked_count_++;
+                    if (cur_ == size_) {
+                        cur_ = i;
+                    }
+                }
+            }
+        }
+    }
+
+    void update_candidate_set() {
+        if (unchecked_count_ > search_capacity_) {
+            for (int i = size_ - 1; i >= 0; i--) {
+                if (data_[i].status != Neighbor::kChecked) {
+                    data_[i].status = Neighbor::kChecked;
+                    unchecked_count_--;
+                    if (i == static_cast<int>(cur_)) {
+                        cur_ = size_;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     size_t capacity_ = 0, size_ = 0, cur_ = 0;
     std::vector<Neighbor> data_;
+
+    size_t search_capacity_ = 0;
+    size_t unchecked_count_ = 0;
 };
 
 class NeighborSetDoublePopList {
@@ -157,6 +217,11 @@ class NeighborSetDoublePopList {
     explicit NeighborSetDoublePopList(size_t capacity = 0) {
         valid_ns_ = std::make_unique<NeighborSetPopList<true>>(capacity);
         invalid_ns_ = std::make_unique<NeighborSetPopList<false>>(capacity);
+    }
+
+    explicit NeighborSetDoublePopList(size_t capacity, size_t search_capacity) {
+        valid_ns_ = std::make_unique<NeighborSetPopList<true>>(capacity, search_capacity);
+        invalid_ns_ = std::make_unique<NeighborSetPopList<false>>(capacity, search_capacity);
     }
 
     // will push any neighbor that does not fit into NeighborSet to disqualified.
