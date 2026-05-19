@@ -1379,81 +1379,78 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         auto distances = std::make_unique<float[]>(rows * k);
 
         try {
-            std::vector<folly::Future<folly::Unit>> futs;
-            futs.reserve(rows);
+            auto run_search_task = [&](int64_t idx) {
+                knowhere::checkCancellation(op_context);
+                // Direct HNSW execution is already controlled by the outer search concurrency.
+                ThreadPool::ScopedSearchOmpSetter setter(1);
 
-            for (int64_t i = 0; i < rows; ++i) {
-                futs.emplace_back(search_pool->push([&, idx = i, is_refined = is_refined,
-                                                     index_wrapper_ptr = index_wrapper_ptr,
-                                                     bf_index_wrapper_ptr = bf_index_wrapper_ptr]() {
-                    knowhere::checkCancellation(op_context);
-                    // 1 thread per element
-                    ThreadPool::ScopedSearchOmpSetter setter(1);
+                // set up a query
+                const float* cur_query = nullptr;
 
-                    // set up a query
-                    const float* cur_query = nullptr;
+                std::vector<float> cur_query_tmp(dim);
+                if (data_format == DataFormatEnum::fp32) {
+                    cur_query = (const float*)data + idx * dim;
+                } else {
+                    convert_rows_to_fp32(data, cur_query_tmp.data(), data_format, idx, 1, dim);
+                    cur_query = cur_query_tmp.data();
+                }
 
-                    std::vector<float> cur_query_tmp(dim);
-                    if (data_format == DataFormatEnum::fp32) {
-                        cur_query = (const float*)data + idx * dim;
-                    } else {
-                        convert_rows_to_fp32(data, cur_query_tmp.data(), data_format, idx, 1, dim);
-                        cur_query = cur_query_tmp.data();
+                // set up local results
+                faiss::idx_t* const __restrict local_ids = ids.get() + k * idx;
+                float* const __restrict local_distances = distances.get() + k * idx;
+
+                // check if we need to perform a brute-force search bcz of the lack of results
+                auto bf_search_needed = [&]() -> bool {
+                    size_t real_topk = 0;
+                    for (auto j = 0; j < k; ++j) {
+                        if (local_ids[j] < 0) {
+                            continue;
+                        }
+                        real_topk++;
                     }
-
-                    // set up local results
-                    faiss::idx_t* const __restrict local_ids = ids.get() + k * idx;
-                    float* const __restrict local_distances = distances.get() + k * idx;
-
-                    // check if we need to perform a brute-force search bcz of the lack of results
-                    auto bf_search_needed = [&]() -> bool {
-                        size_t real_topk = 0;
-                        for (auto j = 0; j < k; ++j) {
-                            if (local_ids[j] < 0) {
-                                continue;
-                            }
-                            real_topk++;
-                        }
-                        if (real_topk < k && real_topk < bitset.size() - bitset.count() &&
-                            bf_index_wrapper_ptr != nullptr && !hnsw_cfg.disable_fallback_brute_force.value()) {
-                            LOG_KNOWHERE_WARNING_ << "required topk: " << k
-                                                  << ", but the actual num of results got from hnsw: " << real_topk
-                                                  << ", trigger brute force search as fallback for hnsw search";
-                            return true;
-                        }
-                        return false;
-                    };
-
-                    // perform the search
-                    if (is_refined) {
-                        faiss::cppcontrib::knowhere::IndexRefineSearchParameters refine_params;
-                        refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
-                        // a refine procedure itself does not need to care about filtering
-                        refine_params.sel = nullptr;
-                        refine_params.base_index_params = &hnsw_search_params;
-
-                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
-                        if (bf_search_needed()) {
-                            bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
-                        }
-                    } else {
-                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &hnsw_search_params);
-                        if (bf_search_needed()) {
-                            bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids,
-                                                         &hnsw_search_params);
-                        }
+                    if (real_topk < k && real_topk < bitset.size() - bitset.count() && bf_index_wrapper_ptr != nullptr &&
+                        !hnsw_cfg.disable_fallback_brute_force.value()) {
+                        LOG_KNOWHERE_WARNING_ << "required topk: " << k
+                                              << ", but the actual num of results got from hnsw: " << real_topk
+                                              << ", trigger brute force search as fallback for hnsw search";
+                        return true;
                     }
+                    return false;
+                };
 
-                    if (!labels.empty()) {
-                        for (auto j = 0; j < k; ++j) {
-                            local_ids[j] = local_ids[j] < 0 ? local_ids[j] : labels[index_id]->operator[](local_ids[j]);
-                        }
+                // perform the search
+                if (is_refined) {
+                    faiss::cppcontrib::knowhere::IndexRefineSearchParameters refine_params;
+                    refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
+                    // a refine procedure itself does not need to care about filtering
+                    refine_params.sel = nullptr;
+                    refine_params.base_index_params = &hnsw_search_params;
+
+                    index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
+                    if (bf_search_needed()) {
+                        bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
                     }
-                }));
+                } else {
+                    index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &hnsw_search_params);
+                    if (bf_search_needed()) {
+                        bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &hnsw_search_params);
+                    }
+                }
+
+                if (!labels.empty()) {
+                    for (auto j = 0; j < k; ++j) {
+                        local_ids[j] = local_ids[j] < 0 ? local_ids[j] : labels[index_id]->operator[](local_ids[j]);
+                    }
+                }
+            };
+
+            if (rows == 1) {
+                run_search_task(0);
+            } else {
+                for (int64_t i = 0; i < rows; ++i) {
+                    run_search_task(i);
+                }
             }
-
-            // wait for the completion
-            WaitAllSuccess(futs);
         } catch (const std::exception& e) {
             LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
             return expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());
