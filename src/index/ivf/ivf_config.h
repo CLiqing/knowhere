@@ -77,7 +77,7 @@ WhetherAcceptableRefineType(const std::string& refine_type) {
 
 inline bool
 WhetherAcceptableSQType(const std::string& sq_type) {
-    std::vector<std::string> allowed_list = {"sq4", "sq6", "sq8"};
+    std::vector<std::string> allowed_list = {"sq4", "sq6", "sq8", "tq1", "tq2", "tq3", "tq4", "tq8"};
     std::string sq_type_tolower = str_to_lower(sq_type);
 
     for (const auto& allowed : allowed_list) {
@@ -87,6 +87,13 @@ WhetherAcceptableSQType(const std::string& sq_type) {
     }
 
     return false;
+}
+
+inline bool
+WhetherTQType(const std::string& sq_type) {
+    const auto sq_type_tolower = str_to_lower(sq_type);
+    return sq_type_tolower == "tq1" || sq_type_tolower == "tq2" || sq_type_tolower == "tq3" ||
+           sq_type_tolower == "tq4" || sq_type_tolower == "tq8";
 }
 
 class IvfFlatConfig : public IvfConfig {};
@@ -292,7 +299,12 @@ class IvfSqConfig : public IvfConfig {
             // check sq_type
             if (sq_type.has_value()) {
                 if (!WhetherAcceptableSQType(sq_type.value())) {
-                    std::string msg = "invalid sq_type : " + sq_type.value() + ", optional types are [sq4, sq6, sq8]";
+                    std::string msg = "invalid sq_type : " + sq_type.value() +
+                                      ", optional types are [sq4, sq6, sq8, tq1, tq2, tq3, tq4, tq8]";
+                    return HandleError(err_msg, msg, Status::invalid_args);
+                }
+                if (WhetherTQType(sq_type.value()) && str_to_lower(metric_type.value()) != "cosine") {
+                    std::string msg = "sq_type " + sq_type.value() + " requires metric_type COSINE";
                     return HandleError(err_msg, msg, Status::invalid_args);
                 }
             }

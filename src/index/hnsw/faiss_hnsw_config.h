@@ -105,6 +105,13 @@ class FaissHnswSqConfig : public FaissHnswConfig {
             .for_static();
     };
 
+    bool
+    WhetherTQType(const std::string& sq_type) {
+        const auto sq_type_tolower = str_to_lower(sq_type);
+        return sq_type_tolower == "tq1" || sq_type_tolower == "tq2" || sq_type_tolower == "tq3" ||
+               sq_type_tolower == "tq4" || sq_type_tolower == "tq8";
+    }
+
     Status
     CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
         // check the base class
@@ -117,7 +124,12 @@ class FaissHnswSqConfig : public FaissHnswConfig {
         if (param_type == PARAM_TYPE::TRAIN) {
             auto sq_type_v = sq_type.value();
             if (!WhetherAcceptableQuantType(sq_type_v)) {
-                std::string msg = "invalid scalar quantizer type";
+                std::string msg =
+                    "invalid scalar quantizer type, optional types are [sq4u, sq6, sq8, fp16, bf16, tq1, tq2, tq3, tq4, tq8]";
+                return HandleError(err_msg, msg, Status::invalid_args);
+            }
+            if (WhetherTQType(sq_type_v) && str_to_lower(metric_type.value()) != "cosine") {
+                std::string msg = "sq_type " + sq_type_v + " requires metric_type COSINE";
                 return HandleError(err_msg, msg, Status::invalid_args);
             }
 
@@ -137,7 +149,8 @@ class FaissHnswSqConfig : public FaissHnswConfig {
     bool
     WhetherAcceptableQuantType(const std::string& sq_type) {
         // todo: add more
-        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "fp16", "bf16"};
+        std::vector<std::string> allowed_list = {"sq4u", "sq6", "sq8", "fp16", "bf16",
+                                                 "tq1",  "tq2", "tq3", "tq4", "tq8"};
         std::string sq_type_tolower = str_to_lower(sq_type);
 
         for (const auto& allowed : allowed_list) {
