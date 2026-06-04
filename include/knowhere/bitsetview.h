@@ -12,6 +12,7 @@
 #ifndef BITSET_H
 #define BITSET_H
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <optional>
@@ -21,6 +22,8 @@
 namespace knowhere {
 class BitsetView {
  public:
+    using ExtraFilterFunc = bool (*)(void*, int64_t);
+
     BitsetView() = default;
     ~BitsetView() = default;
 
@@ -48,10 +51,16 @@ class BitsetView {
     // return the number of filtered out bits. if with id mapping, return the number of filtered out ids.
     size_t
     count() const {
+        size_t base_count = 0;
         if (out_ids_ != nullptr) {
-            return num_filtered_out_ids_;
+            base_count = num_filtered_out_ids_;
+        } else {
+            base_count = num_filtered_out_bits_;
         }
-        return num_filtered_out_bits_;
+        if (extra_filter_func_ != nullptr) {
+            return std::min(size(), std::max(base_count, extra_filtered_out_count_));
+        }
+        return base_count;
     }
 
     size_t
@@ -95,6 +104,18 @@ class BitsetView {
         id_offset_ = id_offset;
     }
 
+    void
+    set_extra_filter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count) {
+        extra_filter_ctx_ = ctx;
+        extra_filter_func_ = func;
+        extra_filtered_out_count_ = filtered_out_count;
+    }
+
+    bool
+    has_extra_filter() const {
+        return extra_filter_func_ != nullptr;
+    }
+
     // if the test succeeds, then the index should be skipped during search; otherwise, it should be included.
     bool
     test(int64_t index) const {
@@ -103,7 +124,12 @@ class BitsetView {
             out_id = out_ids_[out_id];
         }
         // when index is larger than the max_offset, ignore it
-        return (out_id >= static_cast<int64_t>(num_bits_)) || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        bool filtered =
+            (out_id >= static_cast<int64_t>(num_bits_)) || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        if (!filtered && extra_filter_func_ != nullptr) {
+            filtered = extra_filter_func_(extra_filter_ctx_, out_id);
+        }
+        return filtered;
     }
     // return the filtered ratio. if with id mapping, calculated by internal_ids rather than bits.
     float
@@ -224,6 +250,10 @@ class BitsetView {
     const uint32_t* out_ids_ = nullptr;
     size_t num_internal_ids_ = 0;
     size_t num_filtered_out_ids_ = 0;
+
+    void* extra_filter_ctx_ = nullptr;
+    ExtraFilterFunc extra_filter_func_ = nullptr;
+    size_t extra_filtered_out_count_ = 0;
 };
 }  // namespace knowhere
 
