@@ -116,6 +116,21 @@ class BitsetView {
         return extra_filter_func_ != nullptr;
     }
 
+    void*
+    extra_filter_ctx() const {
+        return extra_filter_ctx_;
+    }
+
+    ExtraFilterFunc
+    extra_filter_func() const {
+        return extra_filter_func_;
+    }
+
+    size_t
+    extra_filtered_out_count() const {
+        return extra_filtered_out_count_;
+    }
+
     // if the test succeeds, then the index should be skipped during search; otherwise, it should be included.
     bool
     test(int64_t index) const {
