@@ -3,11 +3,47 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # v2.6 tag is used for cardinal v2
-set(CARDINAL_VERSION ad1587c643e784f2cd567a6de09cc15b6c23a588)
-set(CARDINAL_REPO_URL "https://github.com/CLiqing/cardinal.git")
+set(CARDINAL_VERSION v3.0.1)
+set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
+set(CARDINAL_EXTRA_FILTER_PATCH "${CMAKE_CURRENT_LIST_DIR}/extra_filter.patch")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
 message(STATUS "Build Cardinal-${CARDINAL_VERSION}")
+
+function(apply_cardinal_extra_filter_patch)
+    execute_process(COMMAND git -C ${CARDINAL_ROOT} apply --reverse --check ${CARDINAL_EXTRA_FILTER_PATCH}
+            RESULT_VARIABLE CARDINAL_PATCH_REVERSE_CHECK_RESULT
+            OUTPUT_VARIABLE CARDINAL_PATCH_REVERSE_CHECK_OUTPUT
+            ERROR_VARIABLE CARDINAL_PATCH_REVERSE_CHECK_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_STRIP_TRAILING_WHITESPACE)
+    if (CARDINAL_PATCH_REVERSE_CHECK_RESULT EQUAL "0")
+        message(STATUS "Cardinal extra filter patch already applied")
+        return()
+    endif()
+
+    execute_process(COMMAND git -C ${CARDINAL_ROOT} apply --check ${CARDINAL_EXTRA_FILTER_PATCH}
+            RESULT_VARIABLE CARDINAL_PATCH_CHECK_RESULT
+            OUTPUT_VARIABLE CARDINAL_PATCH_CHECK_OUTPUT
+            ERROR_VARIABLE CARDINAL_PATCH_CHECK_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_STRIP_TRAILING_WHITESPACE)
+    if (NOT CARDINAL_PATCH_CHECK_RESULT EQUAL "0")
+        message(FATAL_ERROR "Failed to check cardinal extra filter patch: ${CARDINAL_PATCH_CHECK_ERROR}")
+    endif()
+
+    execute_process(COMMAND git -C ${CARDINAL_ROOT} apply ${CARDINAL_EXTRA_FILTER_PATCH}
+            RESULT_VARIABLE CARDINAL_PATCH_RESULT
+            OUTPUT_VARIABLE CARDINAL_PATCH_OUTPUT
+            ERROR_VARIABLE CARDINAL_PATCH_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_STRIP_TRAILING_WHITESPACE)
+    if (NOT CARDINAL_PATCH_RESULT EQUAL "0")
+        message(FATAL_ERROR "Failed to apply cardinal extra filter patch: ${CARDINAL_PATCH_ERROR}")
+    else()
+        message(STATUS "Successfully applied cardinal extra filter patch")
+    endif()
+endfunction()
 
 # Clone and checkout cardinal with given repo url and version
 if (NOT EXISTS "${CARDINAL_ROOT}/.git")
@@ -42,6 +78,8 @@ else()
     message(STATUS "Cardinal repo already exist! git commit :  ${GIT_COMMIT_HASH}")
 endif()
 
+apply_cardinal_extra_filter_patch()
+
 # Force checkout the version specified as `CARDINAL_VERSION` if `CARDINAL_VERSION_FORCE_CHECKOUT` is set
 # Default do not checkout for better development convenience
 if(CARDINAL_VERSION_FORCE_CHECKOUT)
@@ -72,6 +110,8 @@ if(CARDINAL_VERSION_FORCE_CHECKOUT)
         message(
                 FATAL_ERROR "Failed to checkout cardinal: ${CARDINAL_CHECKOUT_ERROR}")
     endif()
+
+    apply_cardinal_extra_filter_patch()
 endif()
 
 include(${CARDINAL_ROOT}/know/libcardinal.cmake)

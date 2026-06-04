@@ -1,0 +1,189 @@
+From a7a3c58cc66459950cf58c8d50aa8e361aa3ba4d Mon Sep 17 00:00:00 2001
+From: CLiQing <2208529306@qq.com>
+Date: Thu, 4 Jun 2026 09:32:48 +0000
+Subject: [PATCH 1/2] Add cardinal bitset extra filter callback
+
+---
+ cardinal/algo/filter_checker.h | 29 ++++++++++++++++++++++++++++-
+ cardinal/index/index.cpp       |  4 ++++
+ know/cardinal.cc               | 10 ++++++++++
+ 3 files changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/cardinal/algo/filter_checker.h b/cardinal/algo/filter_checker.h
+index f9913c3..8259994 100644
+--- a/cardinal/algo/filter_checker.h
++++ b/cardinal/algo/filter_checker.h
+@@ -13,6 +13,8 @@ namespace cardinalv2 {
+ 
+ class FilterCheckerView {
+ public:
++    using ExtraFilterFunc = bool (*)(void*, int64_t);
++
+     FilterCheckerView() = default;
+     ~FilterCheckerView() = default;
+ 
+@@ -88,6 +90,23 @@ public:
+         return outer_id_to_internal_id_map_;
+     }
+ 
++    void SetExtraFilter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count) {
++        extra_filter_ctx_ = ctx;
++        extra_filter_func_ = func;
++        extra_filtered_out_count_ = filtered_out_count;
++        total_filter_vectors_count_ = std::max(total_filter_vectors_count_, filtered_out_count);
++    }
++
++    void CopyExtraFilterFrom(const FilterCheckerView& other) {
++        if (other.extra_filter_func_ != nullptr) {
++            SetExtraFilter(other.extra_filter_ctx_, other.extra_filter_func_, other.extra_filtered_out_count_);
++        }
++    }
++
++    bool HasExtraFilter() const {
++        return extra_filter_func_ != nullptr;
++    }
++
+     CARDINAL_FORCE_INLINE bool Valid(int64_t index) const {
+         return Empty() || !Test(index);
+     }
+@@ -207,7 +226,11 @@ private:
+         } else if (internal_id_to_outer_id_map_ != nullptr) {
+             bitId = internal_id_to_outer_id_map_[internal_id];
+         }
+-        return bits_[bitId >> 3] & (0x1 << (bitId & 0x7));
++        bool filtered = bits_[bitId >> 3] & (0x1 << (bitId & 0x7));
++        if (!filtered && extra_filter_func_ != nullptr) {
++            filtered = extra_filter_func_(extra_filter_ctx_, bitId);
++        }
++        return filtered;
+     }
+ 
+     const uint8_t* bits_ = nullptr;
+@@ -225,6 +248,10 @@ private:
+     // to calculate the filtering ratio and adjust vector-indexing strategies accordingly.
+     size_t total_filter_vectors_count_ = 0;
+     size_t total_vectors_count_ = 0;
++
++    void* extra_filter_ctx_ = nullptr;
++    ExtraFilterFunc extra_filter_func_ = nullptr;
++    size_t extra_filtered_out_count_ = 0;
+ };
+ 
+ }  // namespace cardinalv2
+diff --git a/cardinal/index/index.cpp b/cardinal/index/index.cpp
+index b0dc77f..57b2b41 100644
+--- a/cardinal/index/index.cpp
++++ b/cardinal/index/index.cpp
+@@ -136,9 +136,11 @@ CardinalResult<KnnSearchResult> Index::Search(
+                 filter_vector_count += emb_list_offset[i + 1] - emb_list_offset[i];
+             }
+         }
++        auto original_bitset = bitset;
+         bitset = FilterCheckerView(
+             bitset.Data(), bitset.GetFilterBits(), bitset.GetTotalBits(), filter_vector_count, total_vector_count
+         );
++        bitset.CopyExtraFilterFrom(original_bitset);
+     }
+ 
+     // single tenant
+@@ -182,6 +184,7 @@ CardinalResult<KnnSearchResult> Index::Search(
+         tenant_filtered_vectors_count,
+         tenant_total_vectors_count
+     );
++    new_bitset.CopyExtraFilterFrom(bitset);
+     // In super high filter scenarios, an optimization is available: we can iterate over the bitset to find valid bits (outer_ids), then use the forward `map_` to obtain internal_ids, which reduces random memory accesses compared to the alternative approach.
+     // The alternative (default) is to iterate over all internal_ids, use the `reverse_map_` to get the corresponding outer_id, and then check the bitset for validity—this incurs more random memory access.
+     // Currently, in the multi-tenant case, we explicitly set the forward map_ to nullptr to disable this optimization, using the default method instead.
+@@ -261,6 +264,7 @@ std::unique_ptr<IteratorWorkspace> Index::CreateIteratorWorkspace(
+         (index_impl_[index_id]->Count() - (filter.GetTotalCount() - filter.GetFilteredCount())),
+         index_impl_[index_id]->Count()
+     );
++    new_filter.CopyExtraFilterFrom(filter);
+     if (global_meta_.reorder_record_.Size() > 0) {
+         // only reverse map is needed for bitset check thus map is set to nullptr
+         bool do_not_use_forward_map = true;
+diff --git a/know/cardinal.cc b/know/cardinal.cc
+index 7992889..3904b93 100644
+--- a/know/cardinal.cc
++++ b/know/cardinal.cc
+@@ -408,6 +408,11 @@ public:
+         auto filter_count = bitset.count();
+         auto total_count = bitset.size();
+         cardinalv2::FilterCheckerView cardinal_bitset(bitset.data(), filter_count, total_count);
++        if (bitset.has_extra_filter()) {
++            cardinal_bitset.SetExtraFilter(
++                bitset.extra_filter_ctx(), bitset.extra_filter_func(), bitset.extra_filtered_out_count()
++            );
++        }
+         cardinalv2::CardinalSearchStatistics statistics;
+ #ifdef NOT_COMPILE_FOR_SWIG
+         TimeRecorder rc("Search");
+@@ -1129,6 +1134,11 @@ private:
+             auto filter_count = bitset.count();
+             auto total_count = bitset.size();
+             cardinalv2::FilterCheckerView cardinal_bitset(bitset.data(), filter_count, total_count);
++            if (bitset.has_extra_filter()) {
++                cardinal_bitset.SetExtraFilter(
++                    bitset.extra_filter_ctx(), bitset.extra_filter_func(), bitset.extra_filtered_out_count()
++                );
++            }
+ 
+             workspace_ = index_->CreateIteratorWorkspace(query, config, cardinal_bitset, op_context);
+             if (range_radius.has_value()) {
+-- 
+2.34.1
+
+
+From ad1587c643e784f2cd567a6de09cc15b6c23a588 Mon Sep 17 00:00:00 2001
+From: CLiQing <2208529306@qq.com>
+Date: Thu, 4 Jun 2026 13:13:13 +0000
+Subject: [PATCH 2/2] Support extra filter in bit compression
+
+---
+ cardinal/algo/filter_checker.cpp | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/cardinal/algo/filter_checker.cpp b/cardinal/algo/filter_checker.cpp
+index d9d9b15..48057c6 100644
+--- a/cardinal/algo/filter_checker.cpp
++++ b/cardinal/algo/filter_checker.cpp
+@@ -17,6 +17,37 @@ uint32_t FilterCheckerView::BitCompressBatch64(
+         return 0;
+     }
+ 
++    if (extra_filter_func_ != nullptr) {
++        uint32_t count = 0;
++        const auto end = std::min(starting_index + 64, upperbound_index);
++        if ((internal_id_to_emb_list_id_map_ == nullptr && internal_id_to_outer_id_map_ == nullptr) || disable_out_id) {
++            for (int32_t bit_id = starting_index; bit_id < end; ++bit_id) {
++                bool filtered = bits_[bit_id >> 3] & (0x1 << (bit_id & 0x7));
++                if (!filtered) {
++                    filtered = extra_filter_func_(extra_filter_ctx_, bit_id);
++                }
++                if (!filtered) {
++                    indices[count++] = bit_id;
++                }
++            }
++            return count;
++        }
++
++        const Idx* internal_id_to_bit_id_map =
++            internal_id_to_emb_list_id_map_ == nullptr ? internal_id_to_outer_id_map_ : internal_id_to_emb_list_id_map_;
++        for (int32_t internal_id = starting_index; internal_id < end; ++internal_id) {
++            const auto bit_id = internal_id_to_bit_id_map[internal_id];
++            bool filtered = bits_[bit_id >> 3] & (0x1 << (bit_id & 0x7));
++            if (!filtered) {
++                filtered = extra_filter_func_(extra_filter_ctx_, bit_id);
++            }
++            if (!filtered) {
++                indices[count++] = internal_id;
++            }
++        }
++        return count;
++    }
++
+     // use different versions, depending on whether remapping exists or not
+     if ((internal_id_to_emb_list_id_map_ == nullptr && internal_id_to_outer_id_map_ == nullptr) || disable_out_id) {
+         // read up to 64 bits
+-- 
+2.34.1
