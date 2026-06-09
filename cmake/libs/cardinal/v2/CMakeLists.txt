@@ -3,8 +3,8 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # v2.6 tag is used for cardinal v2
-set(CARDINAL_VERSION v3.0.1)
-set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
+set(CARDINAL_VERSION 6d4df7cf99e1d55d917b50858ac15e05af9a053f)
+set(CARDINAL_REPO_URL "https://github.com/CLiqing/cardinal.git")
 set(CARDINAL_EXTRA_FILTER_PATCH "${CMAKE_CURRENT_LIST_DIR}/extra_filter.patch")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
@@ -78,7 +78,7 @@ else()
     message(STATUS "Cardinal repo already exist! git commit :  ${GIT_COMMIT_HASH}")
 endif()
 
-apply_cardinal_extra_filter_patch()
+# The CLiqing cardinal commit already contains the demo extra-filter patches.
 
 # Force checkout the version specified as `CARDINAL_VERSION` if `CARDINAL_VERSION_FORCE_CHECKOUT` is set
 # Default do not checkout for better development convenience
@@ -111,7 +111,7 @@ if(CARDINAL_VERSION_FORCE_CHECKOUT)
                 FATAL_ERROR "Failed to checkout cardinal: ${CARDINAL_CHECKOUT_ERROR}")
     endif()
 
-    apply_cardinal_extra_filter_patch()
+    # The CLiqing cardinal commit already contains the demo extra-filter patches.
 endif()
 
 include(${CARDINAL_ROOT}/know/libcardinal.cmake)

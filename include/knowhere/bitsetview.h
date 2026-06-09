@@ -23,6 +23,7 @@ namespace knowhere {
 class BitsetView {
  public:
     using ExtraFilterFunc = bool (*)(void*, int64_t);
+    using ExtraFirstValidFunc = size_t (*)(void*, size_t, int32_t*);
 
     BitsetView() = default;
     ~BitsetView() = default;
@@ -105,10 +106,12 @@ class BitsetView {
     }
 
     void
-    set_extra_filter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count) {
+    set_extra_filter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count,
+                     ExtraFirstValidFunc first_valid_func = nullptr) {
         extra_filter_ctx_ = ctx;
         extra_filter_func_ = func;
         extra_filtered_out_count_ = filtered_out_count;
+        extra_first_valid_func_ = first_valid_func;
     }
 
     bool
@@ -124,6 +127,11 @@ class BitsetView {
     ExtraFilterFunc
     extra_filter_func() const {
         return extra_filter_func_;
+    }
+
+    ExtraFirstValidFunc
+    extra_first_valid_func() const {
+        return extra_first_valid_func_;
     }
 
     size_t
@@ -268,6 +276,7 @@ class BitsetView {
 
     void* extra_filter_ctx_ = nullptr;
     ExtraFilterFunc extra_filter_func_ = nullptr;
+    ExtraFirstValidFunc extra_first_valid_func_ = nullptr;
     size_t extra_filtered_out_count_ = 0;
 };
 }  // namespace knowhere
