@@ -1,7 +1,7 @@
 From a7a3c58cc66459950cf58c8d50aa8e361aa3ba4d Mon Sep 17 00:00:00 2001
 From: CLiQing <2208529306@qq.com>
 Date: Thu, 4 Jun 2026 09:32:48 +0000
-Subject: [PATCH 1/3] Add cardinal bitset extra filter callback
+Subject: [PATCH 1/4] Add cardinal bitset extra filter callback
 
 ---
  cardinal/algo/filter_checker.h | 29 ++++++++++++++++++++++++++++-
@@ -14,18 +14,18 @@ index f9913c3..8259994 100644
 --- a/cardinal/algo/filter_checker.h
 +++ b/cardinal/algo/filter_checker.h
 @@ -13,6 +13,8 @@ namespace cardinalv2 {
- 
+
  class FilterCheckerView {
  public:
 +    using ExtraFilterFunc = bool (*)(void*, int64_t);
 +
      FilterCheckerView() = default;
      ~FilterCheckerView() = default;
- 
+
 @@ -88,6 +90,23 @@ public:
          return outer_id_to_internal_id_map_;
      }
- 
+
 +    void SetExtraFilter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count) {
 +        extra_filter_ctx_ = ctx;
 +        extra_filter_func_ = func;
@@ -57,7 +57,7 @@ index f9913c3..8259994 100644
 +        }
 +        return filtered;
      }
- 
+
      const uint8_t* bits_ = nullptr;
 @@ -225,6 +248,10 @@ private:
      // to calculate the filtering ratio and adjust vector-indexing strategies accordingly.
@@ -68,7 +68,7 @@ index f9913c3..8259994 100644
 +    ExtraFilterFunc extra_filter_func_ = nullptr;
 +    size_t extra_filtered_out_count_ = 0;
  };
- 
+
  }  // namespace cardinalv2
 diff --git a/cardinal/index/index.cpp b/cardinal/index/index.cpp
 index b0dc77f..57b2b41 100644
@@ -84,7 +84,7 @@ index b0dc77f..57b2b41 100644
          );
 +        bitset.CopyExtraFilterFrom(original_bitset);
      }
- 
+
      // single tenant
 @@ -182,6 +184,7 @@ CardinalResult<KnnSearchResult> Index::Search(
          tenant_filtered_vectors_count,
@@ -127,17 +127,17 @@ index 7992889..3904b93 100644
 +                    bitset.extra_filter_ctx(), bitset.extra_filter_func(), bitset.extra_filtered_out_count()
 +                );
 +            }
- 
+
              workspace_ = index_->CreateIteratorWorkspace(query, config, cardinal_bitset, op_context);
              if (range_radius.has_value()) {
--- 
+--
 2.34.1
 
 
 From ad1587c643e784f2cd567a6de09cc15b6c23a588 Mon Sep 17 00:00:00 2001
 From: CLiQing <2208529306@qq.com>
 Date: Thu, 4 Jun 2026 13:13:13 +0000
-Subject: [PATCH 2/3] Support extra filter in bit compression
+Subject: [PATCH 2/4] Support extra filter in bit compression
 
 ---
  cardinal/algo/filter_checker.cpp | 31 +++++++++++++++++++++++++++++++
@@ -150,7 +150,7 @@ index d9d9b15..48057c6 100644
 @@ -17,6 +17,37 @@ uint32_t FilterCheckerView::BitCompressBatch64(
          return 0;
      }
- 
+
 +    if (extra_filter_func_ != nullptr) {
 +        uint32_t count = 0;
 +        const auto end = std::min(starting_index + 64, upperbound_index);
@@ -185,14 +185,14 @@ index d9d9b15..48057c6 100644
      // use different versions, depending on whether remapping exists or not
      if ((internal_id_to_emb_list_id_map_ == nullptr && internal_id_to_outer_id_map_ == nullptr) || disable_out_id) {
          // read up to 64 bits
--- 
+--
 2.34.1
 
 
 From 6d4df7c00c6d63cd4af1309e6e87c590d4cda13d Mon Sep 17 00:00:00 2001
 From: CLiQing <2208529306@qq.com>
 Date: Tue, 9 Jun 2026 11:56:37 +0000
-Subject: [PATCH 3/3] Add Cardinal first-valid extra filter provider
+Subject: [PATCH 3/4] Add Cardinal first-valid extra filter provider
 
 ---
  cardinal/algo/filter_checker.h      | 45 ++++++++++++++++++++++++--
@@ -210,13 +210,13 @@ index 8259994..cb9b9b3 100644
  public:
      using ExtraFilterFunc = bool (*)(void*, int64_t);
 +    using ExtraFirstValidFunc = size_t (*)(void*, size_t, int32_t*);
- 
+
      FilterCheckerView() = default;
      ~FilterCheckerView() = default;
 @@ -90,16 +91,24 @@ public:
          return outer_id_to_internal_id_map_;
      }
- 
+
 -    void SetExtraFilter(void* ctx, ExtraFilterFunc func, size_t filtered_out_count) {
 +    void SetExtraFilter(
 +        void* ctx, ExtraFilterFunc func, size_t filtered_out_count, ExtraFirstValidFunc first_valid_func = nullptr
@@ -227,7 +227,7 @@ index 8259994..cb9b9b3 100644
          extra_filtered_out_count_ = filtered_out_count;
          total_filter_vectors_count_ = std::max(total_filter_vectors_count_, filtered_out_count);
      }
- 
+
      void CopyExtraFilterFrom(const FilterCheckerView& other) {
          if (other.extra_filter_func_ != nullptr) {
 -            SetExtraFilter(other.extra_filter_ctx_, other.extra_filter_func_, other.extra_filtered_out_count_);
@@ -239,11 +239,11 @@ index 8259994..cb9b9b3 100644
 +            );
          }
      }
- 
+
 @@ -132,6 +141,37 @@ public:
              return std::vector<int32_t>();
          }
- 
+
 +        if (extra_first_valid_func_ != nullptr) {
 +            std::vector<int32_t> valid_bit_ids;
 +            valid_bit_ids.resize(num);
@@ -279,13 +279,13 @@ index 8259994..cb9b9b3 100644
              // traverse bits
              //  bit id -> check bit validity ->  valid bit id (valid emb_list id) -> valid outer id -> valid internal id
 @@ -251,6 +291,7 @@ private:
- 
+
      void* extra_filter_ctx_ = nullptr;
      ExtraFilterFunc extra_filter_func_ = nullptr;
 +    ExtraFirstValidFunc extra_first_valid_func_ = nullptr;
      size_t extra_filtered_out_count_ = 0;
  };
- 
+
 diff --git a/cardinal/searcher/dispatcher.h b/cardinal/searcher/dispatcher.h
 index 992d8e7..d736f9c 100644
 --- a/cardinal/searcher/dispatcher.h
@@ -319,7 +319,7 @@ index 992d8e7..d736f9c 100644
 +                               << ", bf_search_cnt: " << ctx.record.bf_search_cnt
 +                               << ", re_search_cnt: " << ctx.record.re_search_cnt;
 +        }
- 
+
          if (ctx.candidates.size() < std::min(refine_size, valid_cnt)) {
              auto fallback_searcher = SelectFallbackSearcher(ctx, searcher->GetSearcherType());
 +            if (ctx.filter_checker.GetFilterRatio() > 0.0f) {
@@ -348,7 +348,7 @@ index 992d8e7..d736f9c 100644
 +                }
              }
          }
- 
+
 diff --git a/cardinal/searcher/switch_strategy.h b/cardinal/searcher/switch_strategy.h
 index 11bfce7..e82affe 100644
 --- a/cardinal/searcher/switch_strategy.h
@@ -356,7 +356,7 @@ index 11bfce7..e82affe 100644
 @@ -219,43 +219,66 @@ static inline auto SelectMemSearcher(const Config& build_config, size_t nx, cons
                          << ", switch_mem_ivf_by_topk: " << switch_mem_ivf_by_topk
                          << ", ivf_become_bf: " << ivf_become_bf << ", switch_bitset_check: " << switch_bitset_check;
- 
+
 +    SearcherType selected_searcher = SearcherType::LowBitGraphSearcher;
      if (build_config.index_algo == IndexAlgoType::Graph) {
          // for ivf range, use brute force searcher; else use graph searcher (ivf not exists)
@@ -403,7 +403,7 @@ index 11bfce7..e82affe 100644
 +    } else {
 +        InternalAssertInfo(false, "SelectMemSearcher could not make a decision (unknown IndexAlgoType)");
      }
- 
+
 -    InternalAssertInfo(false, "SelectMemSearcher could not make a decision (unknown IndexAlgoType)");
 -    // to silence a compiler
 -    throw;
@@ -431,7 +431,7 @@ index 11bfce7..e82affe 100644
 +
 +    return selected_searcher;
  }
- 
+
  [[nodiscard]]
 diff --git a/know/cardinal.cc b/know/cardinal.cc
 index 3904b93..c8f4bb0 100644
@@ -460,7 +460,432 @@ index 3904b93..c8f4bb0 100644
 +                    bitset.extra_first_valid_func()
                  );
              }
- 
--- 
+
+--
+2.34.1
+
+
+From b03f6f79abcfb8ea90c0a450d8657dedb7deb18d Mon Sep 17 00:00:00 2001
+From: CLiQing <2208529306@qq.com>
+Date: Thu, 11 Jun 2026 06:43:58 +0000
+Subject: [PATCH 4/4] Use generic scalar predicate filter in Cardinal
+
+---
+ cardinal/algo/filter_checker.cpp   |  12 ++-
+ cardinal/algo/filter_checker.h     | 123 ++++++++++++++++++++++++++++-
+ cardinal/operator/graph_operator.h |  47 ++++++++---
+ know/cardinal.cc                   |  37 +++++++++
+ 4 files changed, 204 insertions(+), 15 deletions(-)
+
+diff --git a/cardinal/algo/filter_checker.cpp b/cardinal/algo/filter_checker.cpp
+index 48057c6..d0bfe30 100644
+--- a/cardinal/algo/filter_checker.cpp
++++ b/cardinal/algo/filter_checker.cpp
+@@ -17,13 +17,16 @@ uint32_t FilterCheckerView::BitCompressBatch64(
+         return 0;
+     }
+
+-    if (extra_filter_func_ != nullptr) {
++    if (HasExtraFilter()) {
+         uint32_t count = 0;
+         const auto end = std::min(starting_index + 64, upperbound_index);
+         if ((internal_id_to_emb_list_id_map_ == nullptr && internal_id_to_outer_id_map_ == nullptr) || disable_out_id) {
+             for (int32_t bit_id = starting_index; bit_id < end; ++bit_id) {
+                 bool filtered = bits_[bit_id >> 3] & (0x1 << (bit_id & 0x7));
+-                if (!filtered) {
++                if (!filtered && has_extra_scalar_int64_predicate_filter_) {
++                    filtered = TestExtraScalarInt64PredicateFilter(bit_id);
++                }
++                if (!filtered && extra_filter_func_ != nullptr) {
+                     filtered = extra_filter_func_(extra_filter_ctx_, bit_id);
+                 }
+                 if (!filtered) {
+@@ -38,7 +41,10 @@ uint32_t FilterCheckerView::BitCompressBatch64(
+         for (int32_t internal_id = starting_index; internal_id < end; ++internal_id) {
+             const auto bit_id = internal_id_to_bit_id_map[internal_id];
+             bool filtered = bits_[bit_id >> 3] & (0x1 << (bit_id & 0x7));
+-            if (!filtered) {
++            if (!filtered && has_extra_scalar_int64_predicate_filter_) {
++                filtered = TestExtraScalarInt64PredicateFilter(bit_id);
++            }
++            if (!filtered && extra_filter_func_ != nullptr) {
+                 filtered = extra_filter_func_(extra_filter_ctx_, bit_id);
+             }
+             if (!filtered) {
+diff --git a/cardinal/algo/filter_checker.h b/cardinal/algo/filter_checker.h
+index cb9b9b3..cd064e9 100644
+--- a/cardinal/algo/filter_checker.h
++++ b/cardinal/algo/filter_checker.h
+@@ -16,6 +16,27 @@ public:
+     using ExtraFilterFunc = bool (*)(void*, int64_t);
+     using ExtraFirstValidFunc = size_t (*)(void*, size_t, int32_t*);
+
++    enum class ExtraScalarInt64PredicateOp : int32_t {
++        kNone = 0,
++        kGreaterEqual = 1,
++        kModLessThan = 2,
++    };
++
++    struct ExtraScalarInt64PredicateFilter {
++        const int64_t* row_values = nullptr;
++        const int64_t* const* chunk_values = nullptr;
++        const int64_t* chunk_offsets = nullptr;
++        size_t num_chunks = 0;
++        const int32_t* row_to_sorted_offsets = nullptr;
++        const void* sorted_entries = nullptr;
++        size_t sorted_entry_stride = 0;
++        size_t sorted_value_offset = 0;
++        size_t row_count = 0;
++        ExtraScalarInt64PredicateOp op = ExtraScalarInt64PredicateOp::kNone;
++        int64_t arg0 = 0;
++        int64_t arg1 = 0;
++    };
++
+     FilterCheckerView() = default;
+     ~FilterCheckerView() = default;
+
+@@ -101,6 +122,15 @@ public:
+         total_filter_vectors_count_ = std::max(total_filter_vectors_count_, filtered_out_count);
+     }
+
++    void SetExtraScalarInt64PredicateFilter(
++        const ExtraScalarInt64PredicateFilter& filter, size_t filtered_out_count
++    ) {
++        extra_scalar_int64_predicate_filter_ = filter;
++        has_extra_scalar_int64_predicate_filter_ = true;
++        extra_filtered_out_count_ = filtered_out_count;
++        total_filter_vectors_count_ = std::max(total_filter_vectors_count_, filtered_out_count);
++    }
++
+     void CopyExtraFilterFrom(const FilterCheckerView& other) {
+         if (other.extra_filter_func_ != nullptr) {
+             SetExtraFilter(
+@@ -110,16 +140,43 @@ public:
+                 other.extra_first_valid_func_
+             );
+         }
++        if (other.has_extra_scalar_int64_predicate_filter_) {
++            SetExtraScalarInt64PredicateFilter(
++                other.extra_scalar_int64_predicate_filter_, other.extra_filtered_out_count_
++            );
++        }
+     }
+
+     bool HasExtraFilter() const {
+-        return extra_filter_func_ != nullptr;
++        return extra_filter_func_ != nullptr || has_extra_scalar_int64_predicate_filter_;
++    }
++
++    bool HasExtraScalarInt64PredicateFilter() const {
++        return has_extra_scalar_int64_predicate_filter_;
+     }
+
+     CARDINAL_FORCE_INLINE bool Valid(int64_t index) const {
+         return Empty() || !Test(index);
+     }
+
++    CARDINAL_FORCE_INLINE bool ValidScalarPredicateFast(int64_t index) const {
++        if (!has_extra_scalar_int64_predicate_filter_ || extra_filter_func_ != nullptr) {
++            return Valid(index);
++        }
++
++        int64_t bitId = index;
++        if (internal_id_to_emb_list_id_map_ != nullptr) {
++            bitId = internal_id_to_emb_list_id_map_[index];
++        } else if (internal_id_to_outer_id_map_ != nullptr) {
++            bitId = internal_id_to_outer_id_map_[index];
++        }
++
++        if (bits_[bitId >> 3] & (0x1 << (bitId & 0x7))) {
++            return false;
++        }
++        return !TestExtraScalarInt64PredicateFilter(bitId);
++    }
++
+     /// @brief Populates offsets with bit-enabled indices, starting from starting_index.
+     ///        Up to 64 indices are populated. This is a version that returns int32_t
+     ///        indices.
+@@ -267,6 +324,9 @@ private:
+             bitId = internal_id_to_outer_id_map_[internal_id];
+         }
+         bool filtered = bits_[bitId >> 3] & (0x1 << (bitId & 0x7));
++        if (!filtered && has_extra_scalar_int64_predicate_filter_) {
++            filtered = TestExtraScalarInt64PredicateFilter(bitId);
++        }
+         if (!filtered && extra_filter_func_ != nullptr) {
+             filtered = extra_filter_func_(extra_filter_ctx_, bitId);
+         }
+@@ -293,6 +353,67 @@ private:
+     ExtraFilterFunc extra_filter_func_ = nullptr;
+     ExtraFirstValidFunc extra_first_valid_func_ = nullptr;
+     size_t extra_filtered_out_count_ = 0;
++    ExtraScalarInt64PredicateFilter extra_scalar_int64_predicate_filter_;
++    bool has_extra_scalar_int64_predicate_filter_ = false;
++
++    CARDINAL_FORCE_INLINE bool TestExtraScalarInt64PredicateFilter(int64_t bit_id) const {
++        const auto& filter = extra_scalar_int64_predicate_filter_;
++        int64_t value = 0;
++        if (!GetExtraScalarInt64PredicateValue(bit_id, &value)) {
++            return true;
++        }
++        switch (filter.op) {
++            case ExtraScalarInt64PredicateOp::kGreaterEqual:
++                return value < filter.arg0;
++            case ExtraScalarInt64PredicateOp::kModLessThan:
++                return filter.arg0 <= 0 || value % filter.arg0 >= filter.arg1;
++            case ExtraScalarInt64PredicateOp::kNone:
++                break;
++        }
++        return true;
++    }
++
++    CARDINAL_FORCE_INLINE bool GetExtraScalarInt64PredicateValue(int64_t bit_id, int64_t* value) const {
++        const auto& filter = extra_scalar_int64_predicate_filter_;
++        if (value == nullptr || bit_id < 0 || static_cast<size_t>(bit_id) >= filter.row_count) {
++            return false;
++        }
++        if (filter.row_values != nullptr) {
++            *value = filter.row_values[bit_id];
++            return true;
++        }
++        if (filter.chunk_values != nullptr && filter.chunk_offsets != nullptr && filter.num_chunks > 0) {
++            if (filter.num_chunks == 1) {
++                *value = filter.chunk_values[0][bit_id];
++                return true;
++            }
++            const auto* upper = std::upper_bound(
++                filter.chunk_offsets, filter.chunk_offsets + filter.num_chunks + 1, bit_id
++            );
++            if (upper == filter.chunk_offsets) {
++                return false;
++            }
++            const auto chunk_idx = static_cast<size_t>((upper - filter.chunk_offsets) - 1);
++            if (chunk_idx >= filter.num_chunks) {
++                return false;
++            }
++            *value = filter.chunk_values[chunk_idx][bit_id - filter.chunk_offsets[chunk_idx]];
++            return true;
++        }
++        if (filter.row_to_sorted_offsets == nullptr || filter.sorted_entries == nullptr ||
++            filter.sorted_entry_stride == 0) {
++            return false;
++        }
++        const auto sorted_offset = filter.row_to_sorted_offsets[bit_id];
++        if (sorted_offset < 0) {
++            return false;
++        }
++        const auto* entry = reinterpret_cast<const uint8_t*>(filter.sorted_entries) +
++                            static_cast<size_t>(sorted_offset) * filter.sorted_entry_stride +
++                            filter.sorted_value_offset;
++        *value = *reinterpret_cast<const int64_t*>(entry);
++        return true;
++    }
+ };
+
+ }  // namespace cardinalv2
+diff --git a/cardinal/operator/graph_operator.h b/cardinal/operator/graph_operator.h
+index 829db7a..fb2fad6 100644
+--- a/cardinal/operator/graph_operator.h
++++ b/cardinal/operator/graph_operator.h
+@@ -216,6 +216,10 @@ auto GreedySelectCandidatesNextLoopImpl(
+     const auto& activated_fids = filter_strategy.activated_field_ids;
+     const size_t connectivity_threshold =
+         std::max(1UL, static_cast<size_t>(graph.Width() * filter_strategy.connectivity_ratio));
++    const bool use_scalar_predicate_fast = filter_checker.HasExtraScalarInt64PredicateFilter();
++    auto is_valid = [&](Idx id) {
++        return use_scalar_predicate_fast ? filter_checker.ValidScalarPredicateFast(id) : filter_checker.Valid(id);
++    };
+
+     // uses a ring buffer to prefetch samples that are going to be used in the future.
+
+@@ -294,7 +298,7 @@ auto GreedySelectCandidatesNextLoopImpl(
+                         continue;
+                     }
+                     stat.visited[v] = true;
+-                    bool valid = filter_checker.Valid(v);
++                    bool valid = is_valid(v);
+                     if (!valid) {
+                         // Only reserve invalid ids when the used column is the first graph
+                         if (fid_idx == 0 && invalid_count < connectivity_threshold) {
+@@ -345,14 +349,19 @@ auto GreedySelectCandidatesImpl(
+     bool enable_batch_4 = true
+ ) -> std::vector<algo::SimpleNeighbor<>> {
+     GreedySearchStat<NeighborSetT> stat(graph.Size(), search_limit, result_limit, enable_batch_4);
++    const bool use_scalar_predicate_fast = filter_checker.HasExtraScalarInt64PredicateFilter();
+
+     // init retset with entry_points
+     for (const auto& entry_point : entry_points) {
+-        if (stat.visited[entry_point.GetId()]) {
++        const auto entry_id = entry_point.GetId();
++        if (stat.visited[entry_id]) {
+             continue;
+         }
+-        stat.retset.Insert(entry_point, filter_checker.Valid(entry_point.GetId()));
+-        stat.visited[entry_point.GetId()] = true;
++        stat.retset.Insert(
++            entry_point,
++            use_scalar_predicate_fast ? filter_checker.ValidScalarPredicateFast(entry_id) : filter_checker.Valid(entry_id)
++        );
++        stat.visited[entry_id] = true;
+     }
+
+     GreedySelectCandidatesNextLoopImpl<collect_path, NeighborSetT>(
+@@ -601,6 +610,10 @@ void CachedBeamSelectCandidatesNextLoopImpl(
+     const IAsymmComputer auto& raw_computer, const IAsymmComputer auto& computer, size_t beam_width,
+     FilterCheckerView bitset, const float filter_alpha, CardinalSearchRecord* record = nullptr
+ ) {
++    const bool use_scalar_predicate_fast = bitset.HasExtraScalarInt64PredicateFilter();
++    auto valid = [&](Idx id) {
++        return use_scalar_predicate_fast ? bitset.ValidScalarPredicateFast(id) : bitset.Valid(id);
++    };
+     auto expand = [&](const auto& edges) {
+         std::vector<Idx> un_visited;
+         std::vector<bool> eval_valid;
+@@ -609,7 +622,7 @@ void CachedBeamSelectCandidatesNextLoopImpl(
+                 continue;
+             }
+             stat.visited[to] = true;
+-            bool is_valid = bitset.Valid(to);
++            bool is_valid = valid(to);
+             if (!is_valid) {
+                 stat.acc_alpha += filter_alpha;
+                 if (stat.acc_alpha < 1.0f) {
+@@ -642,7 +655,7 @@ void CachedBeamSelectCandidatesNextLoopImpl(
+         if (record != nullptr) {
+             record->refine_compute_cnt += 1;
+         }
+-        if (bitset.Valid(idx)) {
++        if (valid(idx)) {
+             stat.full_result.emplace_back(idx, cur_dist);
+         }
+         expand(edge_list);
+@@ -692,6 +705,10 @@ void CachedBeamBlockSearchSelectCandidatesNextLoopImpl(
+     const float use_ratio, FilterCheckerView bitset, const float filter_alpha, CardinalSearchRecord* record = nullptr
+ ) {
+     const auto& storage = graph.Storage();
++    const bool use_scalar_predicate_fast = bitset.HasExtraScalarInt64PredicateFilter();
++    auto valid = [&](Idx id) {
++        return use_scalar_predicate_fast ? bitset.ValidScalarPredicateFast(id) : bitset.Valid(id);
++    };
+     auto expand = [&](const auto& edges) {
+         std::vector<Idx> un_visited;
+         std::vector<bool> eval_valid;
+@@ -700,7 +717,7 @@ void CachedBeamBlockSearchSelectCandidatesNextLoopImpl(
+                 continue;
+             }
+             stat.visited[to] = true;
+-            bool is_valid = bitset.Valid(to);
++            bool is_valid = valid(to);
+             if (!is_valid) {
+                 stat.acc_alpha += filter_alpha;
+                 if (stat.acc_alpha < 1.0f) {
+@@ -733,7 +750,7 @@ void CachedBeamBlockSearchSelectCandidatesNextLoopImpl(
+         if (record != nullptr) {
+             record->refine_compute_cnt += 1;
+         }
+-        if (bitset.Valid(idx)) {
++        if (valid(idx)) {
+             stat.full_result.emplace_back(idx, cur_dist);
+         }
+         expand(edge_list);
+@@ -748,7 +765,7 @@ void CachedBeamBlockSearchSelectCandidatesNextLoopImpl(
+             record->refine_compute_cnt += 1;
+         }
+
+-        if (bitset.Valid(idx)) {
++        if (valid(idx)) {
+             stat.full_result.emplace_back(idx, cur_dist);
+         }
+         cands.emplace_back(cur_dist, idx);
+@@ -850,11 +867,15 @@ auto CachedBeamSelectCandidates(
+ ) -> std::vector<algo::SimpleNeighbor<>> {
+     const auto nx = graph.Size();
+     CacheBeamBlockSearchStat<algo::NeighborSetDoublePopList> stat(search_limit, search_limit, nx);
++    const bool use_scalar_predicate_fast = bitset.HasExtraScalarInt64PredicateFilter();
+
+     for (auto ep : entry_points) {
+         stat.visited[ep] = true;
+         // todo: use a threshold here?
+-        stat.retset.Insert({ep, static_cast<float>(computer.one(ep))}, bitset.Valid(ep));
++        stat.retset.Insert(
++            {ep, static_cast<float>(computer.one(ep))},
++            use_scalar_predicate_fast ? bitset.ValidScalarPredicateFast(ep) : bitset.Valid(ep)
++        );
+     }
+
+     CachedBeamSelectCandidatesNextLoopImpl(
+@@ -871,11 +892,15 @@ auto CachedBeamBlockSearchSelectCandidates(
+ ) -> std::vector<algo::SimpleNeighbor<>> {
+     const auto nx = graph.Size();
+     CacheBeamBlockSearchStat<algo::NeighborSetDoublePopList> stat(search_limit, search_limit, nx);
++    const bool use_scalar_predicate_fast = bitset.HasExtraScalarInt64PredicateFilter();
+
+     for (auto ep : entry_points) {
+         stat.visited[ep] = true;
+         // todo: use a threshold here?
+-        stat.retset.Insert({ep, static_cast<float>(computer.one(ep))}, bitset.Valid(ep));
++        stat.retset.Insert(
++            {ep, static_cast<float>(computer.one(ep))},
++            use_scalar_predicate_fast ? bitset.ValidScalarPredicateFast(ep) : bitset.Valid(ep)
++        );
+     }
+
+     CachedBeamBlockSearchSelectCandidatesNextLoopImpl(
+diff --git a/know/cardinal.cc b/know/cardinal.cc
+index c8f4bb0..38a90a0 100644
+--- a/know/cardinal.cc
++++ b/know/cardinal.cc
+@@ -408,6 +408,24 @@ public:
+         auto filter_count = bitset.count();
+         auto total_count = bitset.size();
+         cardinalv2::FilterCheckerView cardinal_bitset(bitset.data(), filter_count, total_count);
++        if (bitset.has_extra_scalar_int64_predicate_filter()) {
++            const auto& src = bitset.extra_scalar_int64_predicate_filter();
++            cardinalv2::FilterCheckerView::ExtraScalarInt64PredicateFilter filter;
++            filter.row_values = src.row_values;
++            filter.chunk_values = src.chunk_values;
++            filter.chunk_offsets = src.chunk_offsets;
++            filter.num_chunks = src.num_chunks;
++            filter.row_to_sorted_offsets = src.row_to_sorted_offsets;
++            filter.sorted_entries = src.sorted_entries;
++            filter.sorted_entry_stride = src.sorted_entry_stride;
++            filter.sorted_value_offset = src.sorted_value_offset;
++            filter.row_count = src.row_count;
++            filter.op =
++                static_cast<cardinalv2::FilterCheckerView::ExtraScalarInt64PredicateOp>(static_cast<int32_t>(src.op));
++            filter.arg0 = src.arg0;
++            filter.arg1 = src.arg1;
++            cardinal_bitset.SetExtraScalarInt64PredicateFilter(filter, bitset.extra_filtered_out_count());
++        }
+         if (bitset.has_extra_filter()) {
+             cardinal_bitset.SetExtraFilter(
+                 bitset.extra_filter_ctx(),
+@@ -1137,6 +1155,25 @@ private:
+             auto filter_count = bitset.count();
+             auto total_count = bitset.size();
+             cardinalv2::FilterCheckerView cardinal_bitset(bitset.data(), filter_count, total_count);
++            if (bitset.has_extra_scalar_int64_predicate_filter()) {
++                const auto& src = bitset.extra_scalar_int64_predicate_filter();
++                cardinalv2::FilterCheckerView::ExtraScalarInt64PredicateFilter filter;
++                filter.row_values = src.row_values;
++                filter.chunk_values = src.chunk_values;
++                filter.chunk_offsets = src.chunk_offsets;
++                filter.num_chunks = src.num_chunks;
++                filter.row_to_sorted_offsets = src.row_to_sorted_offsets;
++                filter.sorted_entries = src.sorted_entries;
++                filter.sorted_entry_stride = src.sorted_entry_stride;
++                filter.sorted_value_offset = src.sorted_value_offset;
++                filter.row_count = src.row_count;
++                filter.op = static_cast<cardinalv2::FilterCheckerView::ExtraScalarInt64PredicateOp>(
++                    static_cast<int32_t>(src.op)
++                );
++                filter.arg0 = src.arg0;
++                filter.arg1 = src.arg1;
++                cardinal_bitset.SetExtraScalarInt64PredicateFilter(filter, bitset.extra_filtered_out_count());
++            }
+             if (bitset.has_extra_filter()) {
+                 cardinal_bitset.SetExtraFilter(
+                     bitset.extra_filter_ctx(),
+--
 2.34.1
 
