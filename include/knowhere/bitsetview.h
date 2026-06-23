@@ -12,6 +12,7 @@
 #ifndef BITSET_H
 #define BITSET_H
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <optional>
@@ -21,6 +22,28 @@
 namespace knowhere {
 class BitsetView {
  public:
+    enum class ExtraScalarInt64PredicateOp : int32_t {
+        kNone = 0,
+        kGreaterEqual = 1,
+        kModLessThan = 2,
+        kGreaterThan = 3,
+        kLessEqual = 4,
+        kLessThan = 5,
+        kEqual = 6,
+        kNotEqual = 7,
+    };
+
+    struct ExtraScalarInt64PredicateFilter {
+        const int64_t* row_values = nullptr;
+        const int64_t* const* chunk_values = nullptr;
+        const int64_t* chunk_offsets = nullptr;
+        size_t num_chunks = 0;
+        size_t row_count = 0;
+        ExtraScalarInt64PredicateOp op = ExtraScalarInt64PredicateOp::kNone;
+        int64_t arg0 = 0;
+        int64_t arg1 = 0;
+    };
+
     BitsetView() = default;
     ~BitsetView() = default;
 
@@ -48,10 +71,16 @@ class BitsetView {
     // return the number of filtered out bits. if with id mapping, return the number of filtered out ids.
     size_t
     count() const {
+        size_t base_count = 0;
         if (out_ids_ != nullptr) {
-            return num_filtered_out_ids_;
+            base_count = num_filtered_out_ids_;
+        } else {
+            base_count = num_filtered_out_bits_;
         }
-        return num_filtered_out_bits_;
+        if (has_extra_scalar_int64_predicate_filter_) {
+            return std::min(size(), std::max(base_count, extra_filtered_out_count_));
+        }
+        return base_count;
     }
 
     size_t
@@ -95,6 +124,28 @@ class BitsetView {
         id_offset_ = id_offset;
     }
 
+    void
+    set_extra_scalar_int64_predicate_filter(const ExtraScalarInt64PredicateFilter& filter, size_t filtered_out_count) {
+        extra_scalar_int64_predicate_filter_ = filter;
+        has_extra_scalar_int64_predicate_filter_ = true;
+        extra_filtered_out_count_ = filtered_out_count;
+    }
+
+    bool
+    has_extra_scalar_int64_predicate_filter() const {
+        return has_extra_scalar_int64_predicate_filter_;
+    }
+
+    const ExtraScalarInt64PredicateFilter&
+    extra_scalar_int64_predicate_filter() const {
+        return extra_scalar_int64_predicate_filter_;
+    }
+
+    size_t
+    extra_filtered_out_count() const {
+        return extra_filtered_out_count_;
+    }
+
     // if the test succeeds, then the index should be skipped during search; otherwise, it should be included.
     bool
     test(int64_t index) const {
@@ -103,7 +154,11 @@ class BitsetView {
             out_id = out_ids_[out_id];
         }
         // when index is larger than the max_offset, ignore it
-        return (out_id >= static_cast<int64_t>(num_bits_)) || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        bool filtered = (out_id >= static_cast<int64_t>(num_bits_)) || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        if (!filtered && has_extra_scalar_int64_predicate_filter_) {
+            filtered = test_extra_scalar_int64_predicate_filter_(out_id);
+        }
+        return filtered;
     }
     // return the filtered ratio. if with id mapping, calculated by internal_ids rather than bits.
     float
@@ -224,6 +279,68 @@ class BitsetView {
     const uint32_t* out_ids_ = nullptr;
     size_t num_internal_ids_ = 0;
     size_t num_filtered_out_ids_ = 0;
+
+    size_t extra_filtered_out_count_ = 0;
+    ExtraScalarInt64PredicateFilter extra_scalar_int64_predicate_filter_;
+    bool has_extra_scalar_int64_predicate_filter_ = false;
+
+    bool
+    test_extra_scalar_int64_predicate_filter_(int64_t out_id) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        int64_t value = 0;
+        if (!get_extra_scalar_int64_predicate_value_(out_id, &value)) {
+            return true;
+        }
+        switch (filter.op) {
+            case ExtraScalarInt64PredicateOp::kGreaterEqual:
+                return value < filter.arg0;
+            case ExtraScalarInt64PredicateOp::kGreaterThan:
+                return value <= filter.arg0;
+            case ExtraScalarInt64PredicateOp::kLessEqual:
+                return value > filter.arg0;
+            case ExtraScalarInt64PredicateOp::kLessThan:
+                return value >= filter.arg0;
+            case ExtraScalarInt64PredicateOp::kEqual:
+                return value != filter.arg0;
+            case ExtraScalarInt64PredicateOp::kNotEqual:
+                return value == filter.arg0;
+            case ExtraScalarInt64PredicateOp::kModLessThan:
+                return filter.arg0 <= 0 || value % filter.arg0 >= filter.arg1;
+            case ExtraScalarInt64PredicateOp::kNone:
+                break;
+        }
+        return true;
+    }
+
+    bool
+    get_extra_scalar_int64_predicate_value_(int64_t out_id, int64_t* value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        if (value == nullptr || out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count) {
+            return false;
+        }
+        if (filter.row_values != nullptr) {
+            *value = filter.row_values[out_id];
+            return true;
+        }
+        if (filter.chunk_values != nullptr && filter.chunk_offsets != nullptr && filter.num_chunks > 0) {
+            if (filter.num_chunks == 1) {
+                *value = filter.chunk_values[0][out_id];
+                return true;
+            }
+            const auto* upper =
+                std::upper_bound(filter.chunk_offsets, filter.chunk_offsets + filter.num_chunks + 1, out_id);
+            if (upper == filter.chunk_offsets) {
+                return false;
+            }
+            const auto chunk_idx = static_cast<size_t>((upper - filter.chunk_offsets) - 1);
+            if (chunk_idx >= filter.num_chunks) {
+                return false;
+            }
+            *value = filter.chunk_values[chunk_idx][out_id - filter.chunk_offsets[chunk_idx]];
+            return true;
+        }
+        return false;
+    }
 };
 }  // namespace knowhere
 
