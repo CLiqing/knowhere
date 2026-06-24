@@ -406,6 +406,9 @@ class BaseFaissRegularIndexNode : public BaseFaissIndexNode {
             return 0;
         }
         size_t first_valid_index = bitset.get_first_valid_index();
+        if (first_valid_index >= bitset.size()) {
+            return 0;
+        }
         if (!bitset.has_out_ids()) {
             first_valid_index = label_to_internal_offset[first_valid_index];
         }

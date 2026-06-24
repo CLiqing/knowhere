@@ -71,16 +71,18 @@ class BitsetView {
     // return the number of filtered out bits. if with id mapping, return the number of filtered out ids.
     size_t
     count() const {
-        size_t base_count = 0;
         if (out_ids_ != nullptr) {
-            base_count = num_filtered_out_ids_;
-        } else {
-            base_count = num_filtered_out_bits_;
+            return num_filtered_out_ids_;
         }
-        if (has_extra_scalar_int64_predicate_filter_) {
-            return std::min(size(), std::max(base_count, extra_filtered_out_count_));
+        return num_filtered_out_bits_;
+    }
+
+    size_t
+    estimated_count() const {
+        if (!has_extra_scalar_int64_predicate_filter_) {
+            return count();
         }
-        return base_count;
+        return std::min(size(), std::max(count(), extra_filtered_out_count_));
     }
 
     size_t
@@ -125,10 +127,11 @@ class BitsetView {
     }
 
     void
-    set_extra_scalar_int64_predicate_filter(const ExtraScalarInt64PredicateFilter& filter, size_t filtered_out_count) {
+    set_extra_scalar_int64_predicate_filter(const ExtraScalarInt64PredicateFilter& filter,
+                                            size_t estimated_filtered_out_count) {
         extra_scalar_int64_predicate_filter_ = filter;
         has_extra_scalar_int64_predicate_filter_ = true;
-        extra_filtered_out_count_ = filtered_out_count;
+        extra_filtered_out_count_ = estimated_filtered_out_count;
     }
 
     bool
@@ -163,7 +166,7 @@ class BitsetView {
     // return the filtered ratio. if with id mapping, calculated by internal_ids rather than bits.
     float
     filter_ratio() const {
-        return empty() ? 0.0f : ((float)count() / size());
+        return empty() ? 0.0f : ((float)estimated_count() / size());
     }
 
     size_t
@@ -212,6 +215,15 @@ class BitsetView {
     // return the first valid idx. if with id mapping, return the first valid internal_id.
     size_t
     get_first_valid_index() const {
+        if (has_extra_scalar_int64_predicate_filter_) {
+            for (size_t i = 0; i < size(); i++) {
+                if (!test(i)) {
+                    return i;
+                }
+            }
+            return size();
+        }
+
         if (out_ids_ != nullptr) {
             // if with id mapping, there is no optimization for the traversal.
             for (size_t i = 0; i < num_internal_ids_; i++) {
