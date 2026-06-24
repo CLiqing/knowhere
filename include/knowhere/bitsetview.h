@@ -144,6 +144,14 @@ class BitsetView {
         return extra_scalar_int64_predicate_filter_;
     }
 
+    void
+    copy_extra_scalar_int64_predicate_filter_from(const BitsetView& other) {
+        if (other.has_extra_scalar_int64_predicate_filter_) {
+            set_extra_scalar_int64_predicate_filter(other.extra_scalar_int64_predicate_filter_,
+                                                    other.extra_filtered_out_count_);
+        }
+    }
+
     size_t
     extra_filtered_out_count() const {
         return extra_filtered_out_count_;
