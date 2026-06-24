@@ -9,6 +9,10 @@ set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
 message(STATUS "Build Cardinal-${CARDINAL_VERSION}")
 
+# Cardinal's Knowhere adapter includes DiskANN config headers when Knowhere is
+# built with DiskANN enabled, so expose DiskANN headers to the Cardinal target.
+include_directories(${KNOWHERE_ROOT}/thirdparty/DiskANN/include)
+
 # Clone and checkout cardinal with given repo url and version
 if (NOT EXISTS "${CARDINAL_ROOT}/.git")
     execute_process(COMMAND git clone ${CARDINAL_REPO_URL} ${CARDINAL_ROOT}
