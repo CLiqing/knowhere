@@ -15,9 +15,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace knowhere {
 class BitsetView {
@@ -31,17 +33,37 @@ class BitsetView {
         kLessThan = 5,
         kEqual = 6,
         kNotEqual = 7,
+        kRange = 8,
+    };
+
+    enum class ExtraScalarPredicateValueType : int32_t {
+        kInt64 = 0,
+        kFloat = 1,
+        kString = 2,
     };
 
     struct ExtraScalarInt64PredicateFilter {
+        ExtraScalarPredicateValueType value_type = ExtraScalarPredicateValueType::kInt64;
         const int64_t* row_values = nullptr;
         const int64_t* const* chunk_values = nullptr;
         const int64_t* chunk_offsets = nullptr;
         size_t num_chunks = 0;
         size_t row_count = 0;
+        const float* row_float_values = nullptr;
+        const float* const* chunk_float_values = nullptr;
+        const char* const* row_string_values = nullptr;
+        const uint32_t* row_string_sizes = nullptr;
         ExtraScalarInt64PredicateOp op = ExtraScalarInt64PredicateOp::kNone;
         int64_t arg0 = 0;
         int64_t arg1 = 0;
+        double double_arg0 = 0.0;
+        double double_arg1 = 0.0;
+        const char* string_arg0_data = nullptr;
+        uint32_t string_arg0_size = 0;
+        const char* string_arg1_data = nullptr;
+        uint32_t string_arg1_size = 0;
+        bool lower_inclusive = true;
+        bool upper_inclusive = true;
     };
 
     BitsetView() = default;
@@ -307,10 +329,35 @@ class BitsetView {
     bool
     test_extra_scalar_int64_predicate_filter_(int64_t out_id) const {
         const auto& filter = extra_scalar_int64_predicate_filter_;
-        int64_t value = 0;
-        if (!get_extra_scalar_int64_predicate_value_(out_id, &value)) {
-            return true;
+        switch (filter.value_type) {
+            case ExtraScalarPredicateValueType::kInt64: {
+                int64_t value = 0;
+                if (!get_extra_scalar_int64_predicate_value_(out_id, &value)) {
+                    return true;
+                }
+                return test_int64_predicate_(value);
+            }
+            case ExtraScalarPredicateValueType::kFloat: {
+                float value = 0.0F;
+                if (!get_extra_scalar_float_predicate_value_(out_id, &value)) {
+                    return true;
+                }
+                return test_double_predicate_(static_cast<double>(value));
+            }
+            case ExtraScalarPredicateValueType::kString: {
+                std::string_view value;
+                if (!get_extra_scalar_string_predicate_value_(out_id, &value)) {
+                    return true;
+                }
+                return test_string_predicate_(value);
+            }
         }
+        return true;
+    }
+
+    bool
+    test_int64_predicate_(int64_t value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
         switch (filter.op) {
             case ExtraScalarInt64PredicateOp::kGreaterEqual:
                 return value < filter.arg0;
@@ -326,6 +373,71 @@ class BitsetView {
                 return value == filter.arg0;
             case ExtraScalarInt64PredicateOp::kModLessThan:
                 return filter.arg0 <= 0 || value % filter.arg0 >= filter.arg1;
+            case ExtraScalarInt64PredicateOp::kRange: {
+                const bool lower_ok = filter.lower_inclusive ? value >= filter.arg0 : value > filter.arg0;
+                const bool upper_ok = filter.upper_inclusive ? value <= filter.arg1 : value < filter.arg1;
+                return !(lower_ok && upper_ok);
+            }
+            case ExtraScalarInt64PredicateOp::kNone:
+                break;
+        }
+        return true;
+    }
+
+    bool
+    test_double_predicate_(double value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        switch (filter.op) {
+            case ExtraScalarInt64PredicateOp::kGreaterEqual:
+                return value < filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kGreaterThan:
+                return value <= filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kLessEqual:
+                return value > filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kLessThan:
+                return value >= filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kEqual:
+                return value != filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kNotEqual:
+                return value == filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kRange: {
+                const bool lower_ok = filter.lower_inclusive ? value >= filter.double_arg0 : value > filter.double_arg0;
+                const bool upper_ok = filter.upper_inclusive ? value <= filter.double_arg1 : value < filter.double_arg1;
+                return !(lower_ok && upper_ok);
+            }
+            case ExtraScalarInt64PredicateOp::kModLessThan:
+            case ExtraScalarInt64PredicateOp::kNone:
+                break;
+        }
+        return true;
+    }
+
+    bool
+    test_string_predicate_(std::string_view value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        const std::string_view arg0(filter.string_arg0_data == nullptr ? "" : filter.string_arg0_data,
+                                    filter.string_arg0_size);
+        const std::string_view arg1(filter.string_arg1_data == nullptr ? "" : filter.string_arg1_data,
+                                    filter.string_arg1_size);
+        switch (filter.op) {
+            case ExtraScalarInt64PredicateOp::kGreaterEqual:
+                return value < arg0;
+            case ExtraScalarInt64PredicateOp::kGreaterThan:
+                return value <= arg0;
+            case ExtraScalarInt64PredicateOp::kLessEqual:
+                return value > arg0;
+            case ExtraScalarInt64PredicateOp::kLessThan:
+                return value >= arg0;
+            case ExtraScalarInt64PredicateOp::kEqual:
+                return value != arg0;
+            case ExtraScalarInt64PredicateOp::kNotEqual:
+                return value == arg0;
+            case ExtraScalarInt64PredicateOp::kRange: {
+                const bool lower_ok = filter.lower_inclusive ? value >= arg0 : value > arg0;
+                const bool upper_ok = filter.upper_inclusive ? value <= arg1 : value < arg1;
+                return !(lower_ok && upper_ok);
+            }
+            case ExtraScalarInt64PredicateOp::kModLessThan:
             case ExtraScalarInt64PredicateOp::kNone:
                 break;
         }
@@ -360,6 +472,47 @@ class BitsetView {
             return true;
         }
         return false;
+    }
+
+    bool
+    get_extra_scalar_float_predicate_value_(int64_t out_id, float* value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        if (value == nullptr || out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count) {
+            return false;
+        }
+        if (filter.row_float_values != nullptr) {
+            *value = filter.row_float_values[out_id];
+            return true;
+        }
+        if (filter.chunk_float_values != nullptr && filter.chunk_offsets != nullptr && filter.num_chunks > 0) {
+            if (filter.num_chunks == 1) {
+                *value = filter.chunk_float_values[0][out_id];
+                return true;
+            }
+            const auto* upper =
+                std::upper_bound(filter.chunk_offsets, filter.chunk_offsets + filter.num_chunks + 1, out_id);
+            if (upper == filter.chunk_offsets) {
+                return false;
+            }
+            const auto chunk_idx = static_cast<size_t>((upper - filter.chunk_offsets) - 1);
+            if (chunk_idx >= filter.num_chunks) {
+                return false;
+            }
+            *value = filter.chunk_float_values[chunk_idx][out_id - filter.chunk_offsets[chunk_idx]];
+            return true;
+        }
+        return false;
+    }
+
+    bool
+    get_extra_scalar_string_predicate_value_(int64_t out_id, std::string_view* value) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        if (value == nullptr || out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count ||
+            filter.row_string_values == nullptr || filter.row_string_sizes == nullptr) {
+            return false;
+        }
+        *value = std::string_view(filter.row_string_values[out_id], filter.row_string_sizes[out_id]);
+        return true;
     }
 };
 }  // namespace knowhere
