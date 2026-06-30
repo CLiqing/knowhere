@@ -34,6 +34,8 @@ class BitsetView {
         kEqual = 6,
         kNotEqual = 7,
         kRange = 8,
+        kAddLessThan = 9,
+        kTerm = 10,
     };
 
     enum class ExtraScalarPredicateValueType : int32_t {
@@ -62,6 +64,13 @@ class BitsetView {
         uint32_t string_arg0_size = 0;
         const char* string_arg1_data = nullptr;
         uint32_t string_arg1_size = 0;
+        const int64_t* int64_terms = nullptr;
+        size_t int64_term_count = 0;
+        const double* double_terms = nullptr;
+        size_t double_term_count = 0;
+        const char* const* string_term_values = nullptr;
+        const uint32_t* string_term_sizes = nullptr;
+        size_t string_term_count = 0;
         bool lower_inclusive = true;
         bool upper_inclusive = true;
     };
@@ -373,6 +382,16 @@ class BitsetView {
                 return value == filter.arg0;
             case ExtraScalarInt64PredicateOp::kModLessThan:
                 return filter.arg0 <= 0 || value % filter.arg0 >= filter.arg1;
+            case ExtraScalarInt64PredicateOp::kAddLessThan:
+                return static_cast<__int128>(value) + static_cast<__int128>(filter.arg0) >=
+                       static_cast<__int128>(filter.arg1);
+            case ExtraScalarInt64PredicateOp::kTerm:
+                for (size_t i = 0; i < filter.int64_term_count; ++i) {
+                    if (value == filter.int64_terms[i]) {
+                        return false;
+                    }
+                }
+                return true;
             case ExtraScalarInt64PredicateOp::kRange: {
                 const bool lower_ok = filter.lower_inclusive ? value >= filter.arg0 : value > filter.arg0;
                 const bool upper_ok = filter.upper_inclusive ? value <= filter.arg1 : value < filter.arg1;
@@ -400,6 +419,15 @@ class BitsetView {
                 return value != filter.double_arg0;
             case ExtraScalarInt64PredicateOp::kNotEqual:
                 return value == filter.double_arg0;
+            case ExtraScalarInt64PredicateOp::kAddLessThan:
+                return value + filter.double_arg0 >= filter.double_arg1;
+            case ExtraScalarInt64PredicateOp::kTerm:
+                for (size_t i = 0; i < filter.double_term_count; ++i) {
+                    if (value == filter.double_terms[i]) {
+                        return false;
+                    }
+                }
+                return true;
             case ExtraScalarInt64PredicateOp::kRange: {
                 const bool lower_ok = filter.lower_inclusive ? value >= filter.double_arg0 : value > filter.double_arg0;
                 const bool upper_ok = filter.upper_inclusive ? value <= filter.double_arg1 : value < filter.double_arg1;
@@ -432,11 +460,20 @@ class BitsetView {
                 return value != arg0;
             case ExtraScalarInt64PredicateOp::kNotEqual:
                 return value == arg0;
+            case ExtraScalarInt64PredicateOp::kTerm:
+                for (size_t i = 0; i < filter.string_term_count; ++i) {
+                    const std::string_view term(filter.string_term_values[i], filter.string_term_sizes[i]);
+                    if (value == term) {
+                        return false;
+                    }
+                }
+                return true;
             case ExtraScalarInt64PredicateOp::kRange: {
                 const bool lower_ok = filter.lower_inclusive ? value >= arg0 : value > arg0;
                 const bool upper_ok = filter.upper_inclusive ? value <= arg1 : value < arg1;
                 return !(lower_ok && upper_ok);
             }
+            case ExtraScalarInt64PredicateOp::kAddLessThan:
             case ExtraScalarInt64PredicateOp::kModLessThan:
             case ExtraScalarInt64PredicateOp::kNone:
                 break;
