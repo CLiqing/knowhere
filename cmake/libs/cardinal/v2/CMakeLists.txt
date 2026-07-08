@@ -3,8 +3,8 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # currenly checkout a commit for cardinal v2. TODO: need a tag here
-set(CARDINAL_VERSION 63dd4ef6220b0e403cc86ec25f01701e3ff9be32)
-set(CARDINAL_REPO_URL "https://github.com/CLiqing/cardinal.git")
+set(CARDINAL_VERSION 91453c2b30b33cd20694ceb9fc2e3168127f8c3c)
+set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
 message(STATUS "Build Cardinal-${CARDINAL_VERSION}")
@@ -75,6 +75,38 @@ if(CARDINAL_VERSION_FORCE_CHECKOUT)
     if(NOT CARDINAL_CHECKOUT_RESULT EQUAL "0")
         message(
                 FATAL_ERROR "Failed to checkout cardinal: ${CARDINAL_CHECKOUT_ERROR}")
+    endif()
+endif()
+
+execute_process(
+        COMMAND git -C ${CARDINAL_ROOT} apply --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+        RESULT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_RESULT
+        OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_OUTPUT
+        ERROR_VARIABLE CARDINAL_ARITH_PATCH_CHECK_ERROR
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+
+if(CARDINAL_ARITH_PATCH_CHECK_RESULT EQUAL "0")
+    execute_process(
+            COMMAND git -C ${CARDINAL_ROOT} apply ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+            RESULT_VARIABLE CARDINAL_ARITH_PATCH_RESULT
+            OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_OUTPUT
+            ERROR_VARIABLE CARDINAL_ARITH_PATCH_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+    if(NOT CARDINAL_ARITH_PATCH_RESULT EQUAL "0")
+        message(FATAL_ERROR "Failed to apply cardinal arithmetic predicate patch: ${CARDINAL_ARITH_PATCH_ERROR}")
+    endif()
+    message(STATUS "Applied cardinal arithmetic predicate patch")
+else()
+    execute_process(
+            COMMAND git -C ${CARDINAL_ROOT} apply --reverse --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+            RESULT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT
+            OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_OUTPUT
+            ERROR_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+    if(CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT EQUAL "0")
+        message(STATUS "Cardinal arithmetic predicate patch already applied")
+    else()
+        message(FATAL_ERROR "Cardinal arithmetic predicate patch cannot be applied: ${CARDINAL_ARITH_PATCH_CHECK_ERROR}")
     endif()
 endif()
 
