@@ -3,8 +3,8 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # currenly checkout a commit for cardinal v2. TODO: need a tag here
-set(CARDINAL_VERSION 91453c2b30b33cd20694ceb9fc2e3168127f8c3c)
-set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
+set(CARDINAL_VERSION 63dd4ef6220b0e403cc86ec25f01701e3ff9be32)
+set(CARDINAL_REPO_URL "https://github.com/CLiqing/cardinal.git")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
 message(STATUS "Build Cardinal-${CARDINAL_VERSION}")
