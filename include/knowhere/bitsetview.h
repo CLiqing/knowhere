@@ -36,6 +36,9 @@ class BitsetView {
         kRange = 8,
         kAddLessThan = 9,
         kTerm = 10,
+        kSubLessThan = 11,
+        kMulLessThan = 12,
+        kDivLessThan = 13,
     };
 
     enum class ExtraScalarPredicateValueType : int32_t {
@@ -385,6 +388,14 @@ class BitsetView {
             case ExtraScalarInt64PredicateOp::kAddLessThan:
                 return static_cast<__int128>(value) + static_cast<__int128>(filter.arg0) >=
                        static_cast<__int128>(filter.arg1);
+            case ExtraScalarInt64PredicateOp::kSubLessThan:
+                return static_cast<__int128>(value) - static_cast<__int128>(filter.arg0) >=
+                       static_cast<__int128>(filter.arg1);
+            case ExtraScalarInt64PredicateOp::kMulLessThan:
+                return static_cast<__int128>(value) * static_cast<__int128>(filter.arg0) >=
+                       static_cast<__int128>(filter.arg1);
+            case ExtraScalarInt64PredicateOp::kDivLessThan:
+                return filter.arg0 == 0 || value / filter.arg0 >= filter.arg1;
             case ExtraScalarInt64PredicateOp::kTerm:
                 for (size_t i = 0; i < filter.int64_term_count; ++i) {
                     if (value == filter.int64_terms[i]) {
@@ -421,6 +432,12 @@ class BitsetView {
                 return value == filter.double_arg0;
             case ExtraScalarInt64PredicateOp::kAddLessThan:
                 return value + filter.double_arg0 >= filter.double_arg1;
+            case ExtraScalarInt64PredicateOp::kSubLessThan:
+                return value - filter.double_arg0 >= filter.double_arg1;
+            case ExtraScalarInt64PredicateOp::kMulLessThan:
+                return value * filter.double_arg0 >= filter.double_arg1;
+            case ExtraScalarInt64PredicateOp::kDivLessThan:
+                return filter.double_arg0 == 0.0 || value / filter.double_arg0 >= filter.double_arg1;
             case ExtraScalarInt64PredicateOp::kTerm:
                 for (size_t i = 0; i < filter.double_term_count; ++i) {
                     if (value == filter.double_terms[i]) {
@@ -474,6 +491,9 @@ class BitsetView {
                 return !(lower_ok && upper_ok);
             }
             case ExtraScalarInt64PredicateOp::kAddLessThan:
+            case ExtraScalarInt64PredicateOp::kSubLessThan:
+            case ExtraScalarInt64PredicateOp::kMulLessThan:
+            case ExtraScalarInt64PredicateOp::kDivLessThan:
             case ExtraScalarInt64PredicateOp::kModLessThan:
             case ExtraScalarInt64PredicateOp::kNone:
                 break;
