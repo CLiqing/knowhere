@@ -16,10 +16,12 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace knowhere {
 class BitsetView {
@@ -39,6 +41,10 @@ class BitsetView {
         kSubLessThan = 11,
         kMulLessThan = 12,
         kDivLessThan = 13,
+        kPrefixMatch = 14,
+        kPostfixMatch = 15,
+        kInnerMatch = 16,
+        kLikeMatch = 17,
     };
 
     enum class ExtraScalarPredicateValueType : int32_t {
@@ -46,6 +52,29 @@ class BitsetView {
         kFloat = 1,
         kString = 2,
     };
+
+    struct RawStringColumnView {
+        const char* const* chunk_bases = nullptr;
+        const uint32_t* const* chunk_value_offsets = nullptr;
+        const bool* const* chunk_valid_data = nullptr;
+        const size_t* chunk_row_counts = nullptr;
+        const int64_t* chunk_row_offsets = nullptr;
+        size_t num_chunks = 0;
+        size_t row_count = 0;
+        size_t uniform_chunk_rows = 0;
+    };
+
+    struct CompiledLikePatternView {
+        const uint32_t* token_offsets = nullptr;
+        const uint32_t* token_sizes = nullptr;
+        const uint8_t* token_types = nullptr;
+        size_t token_count = 0;
+    };
+
+    static_assert(std::is_trivially_copyable_v<RawStringColumnView>);
+    static_assert(std::is_standard_layout_v<RawStringColumnView>);
+    static_assert(std::is_trivially_copyable_v<CompiledLikePatternView>);
+    static_assert(std::is_standard_layout_v<CompiledLikePatternView>);
 
     struct ExtraScalarInt64PredicateFilter {
         ExtraScalarPredicateValueType value_type = ExtraScalarPredicateValueType::kInt64;
@@ -56,8 +85,7 @@ class BitsetView {
         size_t row_count = 0;
         const float* row_float_values = nullptr;
         const float* const* chunk_float_values = nullptr;
-        const char* const* row_string_values = nullptr;
-        const uint32_t* row_string_sizes = nullptr;
+        RawStringColumnView string_column;
         ExtraScalarInt64PredicateOp op = ExtraScalarInt64PredicateOp::kNone;
         int64_t arg0 = 0;
         int64_t arg1 = 0;
@@ -67,6 +95,7 @@ class BitsetView {
         uint32_t string_arg0_size = 0;
         const char* string_arg1_data = nullptr;
         uint32_t string_arg1_size = 0;
+        CompiledLikePatternView like_pattern;
         const int64_t* int64_terms = nullptr;
         size_t int64_term_count = 0;
         const double* double_terms = nullptr;
@@ -74,6 +103,7 @@ class BitsetView {
         const char* const* string_term_values = nullptr;
         const uint32_t* string_term_sizes = nullptr;
         size_t string_term_count = 0;
+        bool string_terms_sorted = false;
         bool lower_inclusive = true;
         bool upper_inclusive = true;
     };
@@ -358,7 +388,8 @@ class BitsetView {
             }
             case ExtraScalarPredicateValueType::kString: {
                 std::string_view value;
-                if (!get_extra_scalar_string_predicate_value_(out_id, &value)) {
+                bool is_valid = false;
+                if (!get_extra_scalar_string_predicate_value_(out_id, &value, &is_valid) || !is_valid) {
                     return true;
                 }
                 return test_string_predicate_(value);
@@ -408,6 +439,10 @@ class BitsetView {
                 const bool upper_ok = filter.upper_inclusive ? value <= filter.arg1 : value < filter.arg1;
                 return !(lower_ok && upper_ok);
             }
+            case ExtraScalarInt64PredicateOp::kPrefixMatch:
+            case ExtraScalarInt64PredicateOp::kPostfixMatch:
+            case ExtraScalarInt64PredicateOp::kInnerMatch:
+            case ExtraScalarInt64PredicateOp::kLikeMatch:
             case ExtraScalarInt64PredicateOp::kNone:
                 break;
         }
@@ -451,10 +486,120 @@ class BitsetView {
                 return !(lower_ok && upper_ok);
             }
             case ExtraScalarInt64PredicateOp::kModLessThan:
+            case ExtraScalarInt64PredicateOp::kPrefixMatch:
+            case ExtraScalarInt64PredicateOp::kPostfixMatch:
+            case ExtraScalarInt64PredicateOp::kInnerMatch:
+            case ExtraScalarInt64PredicateOp::kLikeMatch:
             case ExtraScalarInt64PredicateOp::kNone:
                 break;
         }
         return true;
+    }
+
+    static size_t
+    utf8_char_byte_len_(unsigned char first_byte) {
+        if ((first_byte & 0x80) == 0) {
+            return 1;
+        }
+        if (first_byte >= 0xC2 && first_byte <= 0xDF) {
+            return 2;
+        }
+        if ((first_byte & 0xF0) == 0xE0) {
+            return 3;
+        }
+        if (first_byte >= 0xF0 && first_byte <= 0xF7) {
+            return 4;
+        }
+        return 1;
+    }
+
+    static size_t
+    utf8_wildcard_char_byte_len_(const char* data, size_t remaining) {
+        if (remaining == 0) {
+            return 0;
+        }
+        const auto first_byte = static_cast<unsigned char>(data[0]);
+        const auto char_len = utf8_char_byte_len_(first_byte);
+        if (char_len == 1) {
+            return first_byte <= 0x7F ? 1 : 0;
+        }
+        if (char_len > remaining) {
+            return 0;
+        }
+        for (size_t i = 1; i < char_len; ++i) {
+            if ((static_cast<unsigned char>(data[i]) & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        return char_len;
+    }
+
+    bool
+    matches_compiled_like_(std::string_view value) const {
+        constexpr uint8_t kLiteral = 0;
+        constexpr uint8_t kAnyOne = 1;
+        constexpr uint8_t kAnyMany = 2;
+        constexpr size_t kNoStar = std::numeric_limits<size_t>::max();
+
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        const auto& pattern = filter.like_pattern;
+        if (pattern.token_count > 0 && (filter.string_arg0_data == nullptr || pattern.token_offsets == nullptr ||
+                                        pattern.token_sizes == nullptr || pattern.token_types == nullptr)) {
+            return false;
+        }
+
+        size_t token_idx = 0;
+        size_t value_pos = 0;
+        size_t star_token_idx = kNoStar;
+        size_t star_value_pos = 0;
+        while (value_pos < value.size()) {
+            if (token_idx < pattern.token_count) {
+                const auto token_type = pattern.token_types[token_idx];
+                if (token_type == kAnyMany) {
+                    if (token_idx + 1 == pattern.token_count) {
+                        return true;
+                    }
+                    star_token_idx = token_idx++;
+                    star_value_pos = value_pos;
+                    continue;
+                }
+                if (token_type == kAnyOne) {
+                    const auto char_len =
+                        utf8_wildcard_char_byte_len_(value.data() + value_pos, value.size() - value_pos);
+                    if (char_len > 0) {
+                        value_pos += char_len;
+                        ++token_idx;
+                        continue;
+                    }
+                } else if (token_type == kLiteral) {
+                    const auto offset = pattern.token_offsets[token_idx];
+                    const auto size = pattern.token_sizes[token_idx];
+                    if (offset <= filter.string_arg0_size && size <= filter.string_arg0_size - offset &&
+                        size <= value.size() - value_pos &&
+                        std::memcmp(value.data() + value_pos, filter.string_arg0_data + offset, size) == 0) {
+                        value_pos += size;
+                        ++token_idx;
+                        continue;
+                    }
+                }
+            }
+
+            if (star_token_idx == kNoStar) {
+                return false;
+            }
+            const auto char_len =
+                utf8_wildcard_char_byte_len_(value.data() + star_value_pos, value.size() - star_value_pos);
+            if (char_len == 0) {
+                return false;
+            }
+            star_value_pos += char_len;
+            value_pos = star_value_pos;
+            token_idx = star_token_idx + 1;
+        }
+        while (token_idx < pattern.token_count && pattern.token_types[token_idx] == kAnyMany) {
+            ++token_idx;
+        }
+        return token_idx == pattern.token_count;
     }
 
     bool
@@ -477,19 +622,46 @@ class BitsetView {
                 return value != arg0;
             case ExtraScalarInt64PredicateOp::kNotEqual:
                 return value == arg0;
-            case ExtraScalarInt64PredicateOp::kTerm:
-                for (size_t i = 0; i < filter.string_term_count; ++i) {
-                    const std::string_view term(filter.string_term_values[i], filter.string_term_sizes[i]);
-                    if (value == term) {
+            case ExtraScalarInt64PredicateOp::kTerm: {
+                if (!filter.string_terms_sorted) {
+                    for (size_t i = 0; i < filter.string_term_count; ++i) {
+                        const std::string_view term(filter.string_term_values[i], filter.string_term_sizes[i]);
+                        if (value == term) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                size_t left = 0;
+                size_t right = filter.string_term_count;
+                while (left < right) {
+                    const auto mid = left + (right - left) / 2;
+                    const std::string_view term(filter.string_term_values[mid], filter.string_term_sizes[mid]);
+                    const auto cmp = value.compare(term);
+                    if (cmp == 0) {
                         return false;
+                    }
+                    if (cmp < 0) {
+                        right = mid;
+                    } else {
+                        left = mid + 1;
                     }
                 }
                 return true;
+            }
             case ExtraScalarInt64PredicateOp::kRange: {
                 const bool lower_ok = filter.lower_inclusive ? value >= arg0 : value > arg0;
                 const bool upper_ok = filter.upper_inclusive ? value <= arg1 : value < arg1;
                 return !(lower_ok && upper_ok);
             }
+            case ExtraScalarInt64PredicateOp::kPrefixMatch:
+                return !value.starts_with(arg0);
+            case ExtraScalarInt64PredicateOp::kPostfixMatch:
+                return !value.ends_with(arg0);
+            case ExtraScalarInt64PredicateOp::kInnerMatch:
+                return value.find(arg0) == std::string_view::npos;
+            case ExtraScalarInt64PredicateOp::kLikeMatch:
+                return !matches_compiled_like_(value);
             case ExtraScalarInt64PredicateOp::kAddLessThan:
             case ExtraScalarInt64PredicateOp::kSubLessThan:
             case ExtraScalarInt64PredicateOp::kMulLessThan:
@@ -562,13 +734,57 @@ class BitsetView {
     }
 
     bool
-    get_extra_scalar_string_predicate_value_(int64_t out_id, std::string_view* value) const {
+    get_extra_scalar_string_predicate_value_(int64_t out_id, std::string_view* value, bool* is_valid) const {
         const auto& filter = extra_scalar_int64_predicate_filter_;
-        if (value == nullptr || out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count ||
-            filter.row_string_values == nullptr || filter.row_string_sizes == nullptr) {
+        const auto& column = filter.string_column;
+        if (value == nullptr || is_valid == nullptr || out_id < 0 || static_cast<size_t>(out_id) >= column.row_count ||
+            column.chunk_bases == nullptr || column.chunk_value_offsets == nullptr ||
+            column.chunk_row_counts == nullptr || column.chunk_row_offsets == nullptr || column.num_chunks == 0) {
             return false;
         }
-        *value = std::string_view(filter.row_string_values[out_id], filter.row_string_sizes[out_id]);
+
+        size_t chunk_idx = 0;
+        size_t local_offset = static_cast<size_t>(out_id);
+        if (column.num_chunks > 1) {
+            if (column.uniform_chunk_rows > 0) {
+                chunk_idx = local_offset / column.uniform_chunk_rows;
+                if (chunk_idx >= column.num_chunks) {
+                    return false;
+                }
+                local_offset -= chunk_idx * column.uniform_chunk_rows;
+            } else {
+                const auto* upper = std::upper_bound(column.chunk_row_offsets,
+                                                     column.chunk_row_offsets + column.num_chunks + 1, out_id);
+                if (upper == column.chunk_row_offsets) {
+                    return false;
+                }
+                chunk_idx = static_cast<size_t>((upper - column.chunk_row_offsets) - 1);
+                if (chunk_idx >= column.num_chunks) {
+                    return false;
+                }
+                local_offset -= static_cast<size_t>(column.chunk_row_offsets[chunk_idx]);
+            }
+        }
+
+        const auto* base = column.chunk_bases[chunk_idx];
+        const auto* offsets = column.chunk_value_offsets[chunk_idx];
+        const auto* valid_data = column.chunk_valid_data == nullptr ? nullptr : column.chunk_valid_data[chunk_idx];
+        if (base == nullptr || offsets == nullptr || local_offset >= column.chunk_row_counts[chunk_idx]) {
+            return false;
+        }
+        if (valid_data != nullptr && !valid_data[local_offset]) {
+            *is_valid = false;
+            *value = std::string_view();
+            return true;
+        }
+
+        const auto begin = offsets[local_offset];
+        const auto end = offsets[local_offset + 1];
+        if (end < begin) {
+            return false;
+        }
+        *is_valid = true;
+        *value = std::string_view(base + begin, end - begin);
         return true;
     }
 };
