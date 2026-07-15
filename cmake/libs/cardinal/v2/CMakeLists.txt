@@ -79,34 +79,43 @@ if(CARDINAL_VERSION_FORCE_CHECKOUT)
 endif()
 
 execute_process(
-        COMMAND git -C ${CARDINAL_ROOT} apply --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
-        RESULT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_RESULT
-        OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_OUTPUT
-        ERROR_VARIABLE CARDINAL_ARITH_PATCH_CHECK_ERROR
+        COMMAND grep -q "kSubLessThan" ${CARDINAL_ROOT}/cardinal/algo/filter_checker.h
+        RESULT_VARIABLE CARDINAL_ARITH_PATCH_ALREADY_PRESENT
         OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
 
-if(CARDINAL_ARITH_PATCH_CHECK_RESULT EQUAL "0")
-    execute_process(
-            COMMAND git -C ${CARDINAL_ROOT} apply ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
-            RESULT_VARIABLE CARDINAL_ARITH_PATCH_RESULT
-            OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_OUTPUT
-            ERROR_VARIABLE CARDINAL_ARITH_PATCH_ERROR
-            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
-    if(NOT CARDINAL_ARITH_PATCH_RESULT EQUAL "0")
-        message(FATAL_ERROR "Failed to apply cardinal arithmetic predicate patch: ${CARDINAL_ARITH_PATCH_ERROR}")
-    endif()
-    message(STATUS "Applied cardinal arithmetic predicate patch")
+if(CARDINAL_ARITH_PATCH_ALREADY_PRESENT EQUAL "0")
+    message(STATUS "Cardinal arithmetic predicate support already present")
 else()
     execute_process(
-            COMMAND git -C ${CARDINAL_ROOT} apply --reverse --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
-            RESULT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT
-            OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_OUTPUT
-            ERROR_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_ERROR
+            COMMAND git -C ${CARDINAL_ROOT} apply --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+            RESULT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_RESULT
+            OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_CHECK_OUTPUT
+            ERROR_VARIABLE CARDINAL_ARITH_PATCH_CHECK_ERROR
             OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
-    if(CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT EQUAL "0")
-        message(STATUS "Cardinal arithmetic predicate patch already applied")
+
+    if(CARDINAL_ARITH_PATCH_CHECK_RESULT EQUAL "0")
+        execute_process(
+                COMMAND git -C ${CARDINAL_ROOT} apply ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+                RESULT_VARIABLE CARDINAL_ARITH_PATCH_RESULT
+                OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_OUTPUT
+                ERROR_VARIABLE CARDINAL_ARITH_PATCH_ERROR
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+        if(NOT CARDINAL_ARITH_PATCH_RESULT EQUAL "0")
+            message(FATAL_ERROR "Failed to apply cardinal arithmetic predicate patch: ${CARDINAL_ARITH_PATCH_ERROR}")
+        endif()
+        message(STATUS "Applied cardinal arithmetic predicate patch")
     else()
-        message(FATAL_ERROR "Cardinal arithmetic predicate patch cannot be applied: ${CARDINAL_ARITH_PATCH_CHECK_ERROR}")
+        execute_process(
+                COMMAND git -C ${CARDINAL_ROOT} apply --reverse --check ${CMAKE_CURRENT_LIST_DIR}/arith_predicate_ops.patch
+                RESULT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT
+                OUTPUT_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_OUTPUT
+                ERROR_VARIABLE CARDINAL_ARITH_PATCH_REVERSE_CHECK_ERROR
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+        if(CARDINAL_ARITH_PATCH_REVERSE_CHECK_RESULT EQUAL "0")
+            message(STATUS "Cardinal arithmetic predicate patch already applied")
+        else()
+            message(FATAL_ERROR "Cardinal arithmetic predicate patch cannot be applied: ${CARDINAL_ARITH_PATCH_CHECK_ERROR}")
+        endif()
     endif()
 endif()
 
