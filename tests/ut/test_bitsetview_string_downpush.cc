@@ -59,6 +59,22 @@ TEST_CASE("BitsetView reads nullable varchar from irregular raw chunks") {
     CHECK(not_equal.test(1));
 }
 
+TEST_CASE("BitsetView exposes special ID layout metadata") {
+    static constexpr std::array<uint8_t, 1> bits = {0};
+    static constexpr std::array<uint32_t, 3> out_ids = {2, 0, 1};
+
+    knowhere::BitsetView ordinary(bits.data(), 3);
+    CHECK_FALSE(ordinary.has_out_ids());
+    CHECK(ordinary.id_offset() == 0);
+
+    ordinary.set_out_ids(out_ids.data(), out_ids.size(), 0);
+    CHECK(ordinary.has_out_ids());
+    CHECK(ordinary.id_offset() == 0);
+
+    ordinary.set_id_offset(17);
+    CHECK(ordinary.id_offset() == 17);
+}
+
 TEST_CASE("BitsetView evaluates compiled varchar LIKE without reparsing") {
     static constexpr std::string_view pattern = "%b_";
     static constexpr std::array<uint32_t, 3> token_offsets = {0, 1, 2};
