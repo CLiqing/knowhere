@@ -180,6 +180,30 @@ TEST_CASE("Test BitsetView owned Roaring", "[utils]") {
     REQUIRE(!copy.test(8));
 }
 
+TEST_CASE("Test BitsetView native valid-ID Roaring", "[utils]") {
+    auto* roaring = roaring_bitmap_create();
+    roaring_bitmap_add(roaring, 2);
+    roaring_bitmap_add(roaring, 7);
+    auto owner = std::shared_ptr<const roaring_bitmap_t>(
+        roaring, [](const roaring_bitmap_t* p) { roaring_bitmap_free(const_cast<roaring_bitmap_t*>(p)); });
+
+    auto view = knowhere::BitsetView::FromOwnedRoaringValid(std::move(owner), 10, 8);
+    REQUIRE(view.is_roaring());
+    REQUIRE(view.is_roaring_valid());
+    REQUIRE(view.has_count());
+    REQUIRE(view.count() == 8);
+    REQUIRE(view.get_filtered_out_num_() == 8);
+    REQUIRE(view.get_first_valid_index() == 2);
+    REQUIRE_FALSE(view.test(2));
+    REQUIRE(view.test(3));
+
+    const auto dense = view.ToDense();
+    for (size_t id = 0; id < 10; ++id) {
+        const bool is_filtered = (dense[id >> 3] & (1U << (id & 0x7))) != 0;
+        REQUIRE(is_filtered == (id != 2 && id != 7));
+    }
+}
+
 TEST_CASE("Test BitsetView distinguishes known zero count", "[utils]") {
     std::vector<uint8_t> dense(1, 0);
     knowhere::BitsetView unknown_count(dense.data(), 8);

@@ -26,6 +26,11 @@
 #include <vector>
 
 namespace knowhere {
+enum class BitsetPolarity : uint8_t {
+    FilteredIds,
+    ValidIds,
+};
+
 class BitsetView {
  public:
     BitsetView() = default;
@@ -60,6 +65,22 @@ class BitsetView {
     FromOwnedRoaring(std::shared_ptr<const roaring_bitmap_t> bitmap, size_t num_bits,
                      std::optional<size_t> num_filtered_out_bits = std::nullopt, size_t id_offset = 0) {
         BitsetView bitset(bitmap.get(), num_bits, 0, id_offset);
+        bitset.owned_roaring_ = std::move(bitmap);
+        if (num_filtered_out_bits.has_value()) {
+            bitset.set_count(num_filtered_out_bits.value());
+        }
+        return bitset;
+    }
+
+    // Native scalar BitmapIndex output contains accepted IDs rather than the
+    // historical excluded-ID convention.  Keep this factory separate from
+    // legacy constructors so a Dense bitset cannot accidentally claim this
+    // polarity.
+    static BitsetView
+    FromOwnedRoaringValid(std::shared_ptr<const roaring_bitmap_t> bitmap, size_t num_bits,
+                          std::optional<size_t> num_filtered_out_bits = std::nullopt, size_t id_offset = 0) {
+        BitsetView bitset(bitmap.get(), num_bits, 0, id_offset);
+        bitset.polarity_ = BitsetPolarity::ValidIds;
         bitset.owned_roaring_ = std::move(bitmap);
         if (num_filtered_out_bits.has_value()) {
             bitset.set_count(num_filtered_out_bits.value());
@@ -151,6 +172,16 @@ class BitsetView {
         return kind_ == Kind::Roaring;
     }
 
+    bool
+    is_roaring_valid() const {
+        return is_roaring() && polarity_ == BitsetPolarity::ValidIds;
+    }
+
+    BitsetPolarity
+    polarity() const {
+        return polarity_;
+    }
+
     const roaring_bitmap_t*
     roaring() const {
         return roaring_;
@@ -226,7 +257,8 @@ class BitsetView {
             return true;
         }
         if (kind_ == Kind::Roaring) {
-            return roaring_bitmap_contains(roaring_, static_cast<uint32_t>(out_id));
+            const bool contains = roaring_bitmap_contains(roaring_, static_cast<uint32_t>(out_id));
+            return polarity_ == BitsetPolarity::FilteredIds ? contains : !contains;
         }
         return bits_[out_id >> 3] & (0x1 << (out_id & 0x7));
     }
@@ -252,7 +284,8 @@ class BitsetView {
             return count;
         }
         if (kind_ == Kind::Roaring) {
-            return roaring_bitmap_get_cardinality(roaring_);
+            const auto cardinality = roaring_bitmap_get_cardinality(roaring_);
+            return polarity_ == BitsetPolarity::FilteredIds ? cardinality : num_bits_ - cardinality;
         }
         // if without id mapping, use a better algorithm to calculate the number of filtered out bits.
         size_t ret = 0;
@@ -350,6 +383,7 @@ class BitsetView {
     enum class Kind { Dense, Roaring };
 
     Kind kind_ = Kind::Dense;
+    BitsetPolarity polarity_ = BitsetPolarity::FilteredIds;
     const uint8_t* bits_ = nullptr;
     const roaring_bitmap_t* roaring_ = nullptr;
     // Members are destroyed in reverse declaration order. Keep the frozen backing owner alive until after the
