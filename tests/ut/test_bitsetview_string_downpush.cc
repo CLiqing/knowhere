@@ -1,9 +1,19 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "catch2/catch_test_macros.hpp"
 #include "knowhere/bitsetview.h"
+
+#ifdef KNOWHERE_WITH_CARDINAL
+#include "knowhere/comp/index_param.h"
+#include "knowhere/index/index_factory.h"
+#include "utils.h"
+#endif
 
 namespace {
 
@@ -188,3 +198,121 @@ TEST_CASE("BitsetView raw string lookup uses uniform chunks") {
     CHECK_FALSE(view.test(3));
     CHECK(view.test(4));
 }
+
+#ifdef KNOWHERE_WITH_CARDINAL
+TEST_CASE("Cardinal HNSW varchar batch search matches scalar end to end") {
+    const auto env_int = [](const char* name, int64_t fallback) {
+        const char* value = std::getenv(name);
+        return value == nullptr ? fallback : std::max<int64_t>(1, std::strtoll(value, nullptr, 10));
+    };
+    const int64_t rows = env_int("VBP_P4_ROWS", 512);
+    const int64_t queries_count = env_int("VBP_P4_QUERIES", 8);
+    const int64_t dim = env_int("VBP_P4_DIM", 32);
+    const int64_t topk = env_int("VBP_P4_TOPK", 20);
+    const int64_t ef = env_int("VBP_P4_EF", 64);
+    const int64_t graph_degree = env_int("VBP_P4_GRAPH_DEGREE", 32);
+    const uint32_t string_length = static_cast<uint32_t>(env_int("VBP_P4_STRING_LENGTH", 32));
+    const std::string target(string_length, 'm');
+
+    INFO("rows=" << rows << " nq=" << queries_count << " dim=" << dim << " topk=" << topk << " ef=" << ef
+                 << " graph_degree=" << graph_degree << " string_length=" << string_length);
+
+    auto train = GenDataSet(rows, dim, 20260723);
+    auto queries = GenDataSet(queries_count, dim, 20260724);
+
+    knowhere::Json build_config;
+    build_config[knowhere::meta::DIM] = dim;
+    build_config[knowhere::meta::METRIC_TYPE] = knowhere::metric::L2;
+    build_config[knowhere::indexparam::HNSW_M] = graph_degree;
+    build_config[knowhere::indexparam::EFCONSTRUCTION] = 120;
+    build_config["index_algo"] = "GRAPH";
+
+    const auto version = std::max(knowhere::Version::GetCurrentVersion().VersionNumber(), 9);
+    auto index =
+        knowhere::IndexFactory::Instance().Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW, version).value();
+    REQUIRE(index.Build(train, build_config) == knowhere::Status::success);
+
+    std::vector<char> values(static_cast<size_t>(rows) * string_length);
+    std::vector<uint32_t> offsets(static_cast<size_t>(rows) + 1);
+    for (int64_t row = 0; row < rows; ++row) {
+        offsets[static_cast<size_t>(row)] = static_cast<uint32_t>(row) * string_length;
+        const char fill = row % 2 == 0 ? 'm' : 'x';
+        std::fill_n(values.data() + static_cast<size_t>(row) * string_length, string_length, fill);
+    }
+    offsets.back() = static_cast<uint32_t>(values.size());
+
+    const std::array<const char*, 1> chunk_bases = {values.data()};
+    const std::array<const uint32_t*, 1> chunk_value_offsets = {offsets.data()};
+    const std::array<const bool*, 1> chunk_valid_data = {nullptr};
+    const std::array<size_t, 1> chunk_row_counts = {static_cast<size_t>(rows)};
+    const std::array<int64_t, 2> chunk_row_offsets = {0, rows};
+    std::vector<uint8_t> bits((static_cast<size_t>(rows) + 7) / 8, 0);
+
+    knowhere::BitsetView::ExtraScalarInt64PredicateFilter predicate;
+    predicate.value_type = knowhere::BitsetView::ExtraScalarPredicateValueType::kString;
+    predicate.op = knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual;
+    predicate.row_count = rows;
+    predicate.string_arg0_data = target.data();
+    predicate.string_arg0_size = static_cast<uint32_t>(target.size());
+    predicate.string_column.chunk_bases = chunk_bases.data();
+    predicate.string_column.chunk_value_offsets = chunk_value_offsets.data();
+    predicate.string_column.chunk_valid_data = chunk_valid_data.data();
+    predicate.string_column.chunk_row_counts = chunk_row_counts.data();
+    predicate.string_column.chunk_row_offsets = chunk_row_offsets.data();
+    predicate.string_column.num_chunks = 1;
+    predicate.string_column.row_count = rows;
+
+    knowhere::BitsetView filter(bits.data(), rows);
+    filter.set_extra_scalar_int64_predicate_filter(predicate, rows / 2);
+
+    knowhere::Json scalar_config = build_config;
+    scalar_config[knowhere::meta::TOPK] = topk;
+    scalar_config[knowhere::indexparam::EF] = ef;
+    scalar_config["level"] = 1;
+    scalar_config["switch_ivf_ratio"] = 1.0;
+    scalar_config["enable_batch_4"] = false;
+    scalar_config["downpush_debug_counter"] = true;
+    scalar_config["experimental_filter_batch_observe"] = true;
+    scalar_config["experimental_filter_batch_observe_width"] = 16;
+    scalar_config["experimental_filter_batch_mode"] = "off";
+
+    auto reference_config = scalar_config;
+    reference_config["experimental_filter_batch_mode"] = "force";
+    reference_config["experimental_filter_batch_width"] = 16;
+    reference_config["experimental_filter_batch_min_fill"] = 1;
+    reference_config["experimental_filter_batch_tail_mode"] = "batch";
+    reference_config["experimental_filter_batch_prefetch"] = false;
+    reference_config["experimental_filter_batch_kernel"] = "reference";
+
+    auto portable_config = reference_config;
+    portable_config["experimental_filter_batch_prefetch"] = true;
+    portable_config["experimental_filter_batch_kernel"] = "portable";
+
+    const auto scalar = index.Search(queries, scalar_config, filter);
+    const auto reference = index.Search(queries, reference_config, filter);
+    const auto portable = index.Search(queries, portable_config, filter);
+    REQUIRE(scalar.has_value());
+    REQUIRE(reference.has_value());
+    REQUIRE(portable.has_value());
+
+    const auto require_same_result = [](const knowhere::DataSet& expected, const knowhere::DataSet& actual) {
+        REQUIRE(actual.GetRows() == expected.GetRows());
+        REQUIRE(actual.GetDim() == expected.GetDim());
+        const auto count = static_cast<size_t>(expected.GetRows() * expected.GetDim());
+        for (size_t i = 0; i < count; ++i) {
+            REQUIRE(actual.GetIds()[i] == expected.GetIds()[i]);
+            REQUIRE(actual.GetDistance()[i] == expected.GetDistance()[i]);
+        }
+    };
+
+    require_same_result(*scalar.value(), *reference.value());
+    require_same_result(*scalar.value(), *portable.value());
+
+    const auto result_count = static_cast<size_t>(scalar.value()->GetRows() * scalar.value()->GetDim());
+    for (size_t i = 0; i < result_count; ++i) {
+        REQUIRE(scalar.value()->GetIds()[i] >= 0);
+        REQUIRE(scalar.value()->GetIds()[i] % 2 == 0);
+    }
+
+}
+#endif
