@@ -10,6 +10,8 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include <chrono>
+#include <memory>
+#include <new>
 #include <thread>
 #include <vector>
 
@@ -128,6 +130,7 @@ TEST_CASE("Test BitsetView Roaring", "[utils]") {
     knowhere::BitsetView dense_view(dense.data(), 16);
     knowhere::BitsetView roaring_view(roaring, 16);
     REQUIRE(roaring_view.is_roaring());
+    REQUIRE(!roaring_view.has_count());
     REQUIRE(roaring_view.count() == 0);
     REQUIRE(roaring_view.get_filtered_out_num_() == dense_view.get_filtered_out_num_());
     REQUIRE(roaring_view.filter_ratio() == dense_view.filter_ratio());
@@ -156,23 +159,94 @@ TEST_CASE("Test BitsetView Roaring", "[utils]") {
     roaring_bitmap_free(roaring);
 }
 
+TEST_CASE("Test BitsetView owned Roaring", "[utils]") {
+    auto* roaring = roaring_bitmap_create();
+    roaring_bitmap_add(roaring, 2);
+    roaring_bitmap_add(roaring, 7);
+    auto owner = std::shared_ptr<const roaring_bitmap_t>(
+        roaring, [](const roaring_bitmap_t* p) { roaring_bitmap_free(const_cast<roaring_bitmap_t*>(p)); });
+
+    auto view = knowhere::BitsetView::FromOwnedRoaring(owner, 10, 2);
+    auto copy = view;
+    owner.reset();
+    view = nullptr;
+
+    REQUIRE(copy.is_roaring());
+    REQUIRE(copy.has_valid_storage());
+    REQUIRE(copy.has_count());
+    REQUIRE(copy.count() == 2);
+    REQUIRE(copy.test(2));
+    REQUIRE(copy.test(7));
+    REQUIRE(!copy.test(8));
+}
+
+TEST_CASE("Test BitsetView distinguishes known zero count", "[utils]") {
+    std::vector<uint8_t> dense(1, 0);
+    knowhere::BitsetView unknown_count(dense.data(), 8);
+    REQUIRE(!unknown_count.has_count());
+    REQUIRE(unknown_count.count() == 0);
+
+    unknown_count.set_count(0);
+    REQUIRE(unknown_count.has_count());
+    REQUIRE(unknown_count.count() == 0);
+
+    auto* roaring = roaring_bitmap_create();
+    auto owner = std::shared_ptr<const roaring_bitmap_t>(
+        roaring, [](const roaring_bitmap_t* p) { roaring_bitmap_free(const_cast<roaring_bitmap_t*>(p)); });
+    auto known_zero = knowhere::BitsetView::FromOwnedRoaring(std::move(owner), 8, 0);
+    REQUIRE(known_zero.has_count());
+    REQUIRE(known_zero.count() == 0);
+}
+
+TEST_CASE("Test BitsetView reports null storage", "[utils]") {
+    knowhere::BitsetView null_dense(static_cast<const uint8_t*>(nullptr), 8);
+    knowhere::BitsetView null_roaring(static_cast<const roaring_bitmap_t*>(nullptr), 8);
+    REQUIRE(!null_dense.has_valid_storage());
+    REQUIRE(!null_roaring.has_valid_storage());
+    REQUIRE(knowhere::BitsetView(nullptr, 0).has_valid_storage());
+}
+
 TEST_CASE("Test BitsetView Frozen Roaring", "[utils]") {
     auto* roaring = roaring_bitmap_create();
     for (auto id : {0, 2, 4, 10}) {
         roaring_bitmap_add(roaring, id);
     }
     const auto frozen_size = roaring_bitmap_frozen_size_in_bytes(roaring);
-    std::vector<char> frozen(frozen_size);
-    roaring_bitmap_frozen_serialize(roaring, frozen.data());
+    void* frozen_data = ::operator new(frozen_size, std::align_val_t(32));
+    auto frozen_owner = std::shared_ptr<const void>(frozen_data, [](const void* p) {
+        ::operator delete(const_cast<void*>(p), std::align_val_t(32));
+    });
+    roaring_bitmap_frozen_serialize(roaring, static_cast<char*>(frozen_data));
 
-    auto frozen_view = knowhere::BitsetView::FromFrozenRoaring(frozen.data(), frozen.size(), 12);
+    auto frozen_view = knowhere::BitsetView::FromFrozenRoaring(frozen_owner, frozen_data, frozen_size, 12, 4);
+    frozen_owner.reset();
     REQUIRE(frozen_view.is_roaring());
+    REQUIRE(frozen_view.has_count());
+    REQUIRE(frozen_view.count() == 4);
     REQUIRE(frozen_view.get_filtered_out_num_() == 4);
     REQUIRE(frozen_view.get_first_valid_index() == 1);
     REQUIRE(frozen_view.test(0));
     REQUIRE(!frozen_view.test(1));
     REQUIRE(frozen_view.test(10));
     REQUIRE(frozen_view.test(12));
+
+    roaring_bitmap_free(roaring);
+}
+
+TEST_CASE("Test BitsetView Frozen Roaring requires aligned owned backing", "[utils]") {
+    auto* roaring = roaring_bitmap_create();
+    roaring_bitmap_add(roaring, 1);
+    const auto frozen_size = roaring_bitmap_frozen_size_in_bytes(roaring);
+
+    std::vector<char> storage(frozen_size + 32);
+    const auto* base = storage.data();
+    const auto offset = reinterpret_cast<uintptr_t>(base) % 32 == 0 ? 1 : 0;
+    const auto* unaligned_data = base + offset;
+    auto no_op_owner = std::shared_ptr<const void>(storage.data(), [](const void*) {});
+    REQUIRE_THROWS_AS(knowhere::BitsetView::FromFrozenRoaring(no_op_owner, unaligned_data, frozen_size, 4),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(knowhere::BitsetView::FromFrozenRoaring({}, unaligned_data, frozen_size, 4),
+                      std::invalid_argument);
 
     roaring_bitmap_free(roaring);
 }

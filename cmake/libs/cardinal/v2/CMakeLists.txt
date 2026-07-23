@@ -3,7 +3,7 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # currenly checkout a commit for cardinal v2. TODO: need a tag here
-set(CARDINAL_VERSION v3.0.3)
+set(CARDINAL_VERSION bc34e5d1c5f4ef4a51395b13e2bb2c74f63717c9)
 set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
@@ -35,6 +35,15 @@ if (NOT EXISTS "${CARDINAL_ROOT}/.git")
     endif()
 else()
     execute_process(
+          COMMAND git -C ${CARDINAL_ROOT} remote get-url origin
+          OUTPUT_VARIABLE CARDINAL_ORIGIN_URL
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT CARDINAL_ORIGIN_URL STREQUAL CARDINAL_REPO_URL)
+        message(FATAL_ERROR
+                "Existing Cardinal checkout has origin ${CARDINAL_ORIGIN_URL}, expected ${CARDINAL_REPO_URL}")
+    endif()
+    execute_process(
           COMMAND git -C ${CARDINAL_ROOT} rev-parse HEAD
           OUTPUT_VARIABLE GIT_COMMIT_HASH
           OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -43,7 +52,7 @@ else()
 endif()
 
 # Force checkout the version specified as `CARDINAL_VERSION` if `CARDINAL_VERSION_FORCE_CHECKOUT` is set
-# Default do not checkout for better development convenience
+# The experiment build enables this by default to make the nested Cardinal dependency reproducible.
 if(CARDINAL_VERSION_FORCE_CHECKOUT)
     message(STATUS "Checking out cardinal version ${CARDINAL_VERSION}")
 

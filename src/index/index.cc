@@ -38,6 +38,26 @@ LoadConfig(BaseConfig* cfg, const Json& json, knowhere::PARAM_TYPE param_type, c
     return Config::Load(*cfg, json_, param_type, msg);
 }
 
+inline Status
+PrepareBitset(const BitsetView& input, BitsetView* output, std::string* msg) {
+    if (!input.has_valid_storage()) {
+        *msg = fmt::format("{} bitset with {} bits has null storage", input.is_roaring() ? "Roaring" : "Dense",
+                           input.size());
+        return Status::invalid_args;
+    }
+
+    *output = input;
+    if (!output->has_count()) {
+        output->set_count(output->get_filtered_out_num_());
+    }
+    if (output->count() > output->size()) {
+        *msg = fmt::format("bitset filtered count should be <= bitset size, but we get count: {}, size: {}",
+                           output->count(), output->size());
+        return Status::invalid_args;
+    }
+    return Status::success;
+}
+
 #ifdef KNOWHERE_WITH_CARDINAL
 template <typename T>
 inline const std::shared_ptr<Interrupt>
@@ -151,14 +171,10 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
         }
 
         BitsetView bitset;
-        if (bitset_.count() == 0) {
-            // traverse bitset to get the filtered out num
-            auto filtered_out_num = bitset_.get_filtered_out_num_();
-            bitset = bitset_;
-            bitset.set_count(filtered_out_num);
-        } else {
-            // if bitset has filtered out num, use it
-            bitset = bitset_;
+        const Status bitset_status = PrepareBitset(bitset_, &bitset, &msg);
+        if (bitset_status != Status::success) {
+            LOG_KNOWHERE_ERROR_ << msg;
+            return expected<DataSetPtr>::Err(bitset_status, msg);
         }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -213,9 +229,11 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = bitset_;
-        if (bitset.count() == 0) {
-            bitset.set_count(bitset.get_filtered_out_num_());
+        BitsetView bitset;
+        const Status bitset_status = PrepareBitset(bitset_, &bitset, &msg);
+        if (bitset_status != Status::success) {
+            LOG_KNOWHERE_ERROR_ << msg;
+            return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(bitset_status, msg);
         }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -256,9 +274,11 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<DataSetPtr>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = bitset_;
-        if (bitset.count() == 0) {
-            bitset.set_count(bitset.get_filtered_out_num_());
+        BitsetView bitset;
+        const Status bitset_status = PrepareBitset(bitset_, &bitset, &msg);
+        if (bitset_status != Status::success) {
+            LOG_KNOWHERE_ERROR_ << msg;
+            return expected<DataSetPtr>::Err(bitset_status, msg);
         }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)

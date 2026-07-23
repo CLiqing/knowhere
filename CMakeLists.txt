@@ -51,7 +51,7 @@ set(KNOWHERE_THRID_ROOT ${KNOWHERE_ROOT}/thirdparty)
 # cloud environment
 knowhere_option(WITH_CARDINAL "Build with cardinal" OFF)
 knowhere_option(CARDINAL_VERSION_FORCE_CHECKOUT
-                "Force checkout cardinal version" OFF)
+                "Force checkout cardinal version" ON)
 
 if(KNOWHERE_VERSION)
   message(STATUS "Building KNOWHERE version: ${KNOWHERE_VERSION}")

@@ -45,7 +45,7 @@ class KnowhereConan(ConanFile):
         "with_diskann": False,
         "with_svs": False,
         "with_cardinal": False,
-        "cardinal_version_force_checkout": False,
+        "cardinal_version_force_checkout": True,
         "with_profiler": False,
         "with_ut": False,
         "glog/*:shared": True,

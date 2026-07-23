@@ -15,11 +15,14 @@
 #include <roaring/roaring.h>
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace knowhere {
@@ -33,6 +36,7 @@ class BitsetView {
           bits_(data),
           num_bits_(num_bits),
           num_filtered_out_bits_(num_filtered_out_bits),
+          count_known_(num_filtered_out_bits != 0),
           id_offset_(id_offset) {
     }
 
@@ -41,6 +45,7 @@ class BitsetView {
           roaring_(bitmap),
           num_bits_(num_bits),
           num_filtered_out_bits_(num_filtered_out_bits),
+          count_known_(num_filtered_out_bits != 0),
           id_offset_(id_offset) {
     }
 
@@ -52,12 +57,39 @@ class BitsetView {
     }
 
     static BitsetView
-    FromFrozenRoaring(const void* data, size_t byte_size, size_t num_bits, size_t num_filtered_out_bits = 0,
-                      size_t id_offset = 0) {
+    FromOwnedRoaring(std::shared_ptr<const roaring_bitmap_t> bitmap, size_t num_bits,
+                     std::optional<size_t> num_filtered_out_bits = std::nullopt, size_t id_offset = 0) {
+        BitsetView bitset(bitmap.get(), num_bits, 0, id_offset);
+        bitset.owned_roaring_ = std::move(bitmap);
+        if (num_filtered_out_bits.has_value()) {
+            bitset.set_count(num_filtered_out_bits.value());
+        }
+        return bitset;
+    }
+
+    static BitsetView
+    FromFrozenRoaring(std::shared_ptr<const void> data_owner, const void* data, size_t byte_size, size_t num_bits,
+                      std::optional<size_t> num_filtered_out_bits = std::nullopt, size_t id_offset = 0) {
+        if (data == nullptr) {
+            throw std::invalid_argument("frozen Roaring data must not be null");
+        }
+        if (data_owner == nullptr) {
+            throw std::invalid_argument("frozen Roaring data must have an owner");
+        }
+        if (reinterpret_cast<uintptr_t>(data) % 32 != 0) {
+            throw std::invalid_argument("frozen Roaring data must be 32-byte aligned");
+        }
         const auto* bitmap = roaring_bitmap_frozen_view(static_cast<const char*>(data), byte_size);
-        BitsetView bitset(bitmap, num_bits, num_filtered_out_bits, id_offset);
+        if (bitmap == nullptr) {
+            throw std::invalid_argument("invalid frozen Roaring data");
+        }
+        BitsetView bitset(bitmap, num_bits, 0, id_offset);
+        bitset.roaring_backing_owner_ = std::move(data_owner);
         bitset.owned_roaring_ = std::shared_ptr<const roaring_bitmap_t>(
             bitmap, [](const roaring_bitmap_t* p) { roaring_bitmap_free(const_cast<roaring_bitmap_t*>(p)); });
+        if (num_filtered_out_bits.has_value()) {
+            bitset.set_count(num_filtered_out_bits.value());
+        }
         return bitset;
     }
 
@@ -84,13 +116,19 @@ class BitsetView {
         return num_filtered_out_bits_;
     }
 
+    bool
+    has_count() const {
+        return count_known_;
+    }
+
     void
     set_count(size_t num_filtered_out_bits) {
         if (out_ids_ != nullptr) {
             num_filtered_out_ids_ = num_filtered_out_bits;
-            return;
+        } else {
+            num_filtered_out_bits_ = num_filtered_out_bits;
         }
-        num_filtered_out_bits_ = num_filtered_out_bits;
+        count_known_ = true;
     }
 
     size_t
@@ -116,6 +154,11 @@ class BitsetView {
     const roaring_bitmap_t*
     roaring() const {
         return roaring_;
+    }
+
+    bool
+    has_valid_storage() const {
+        return num_bits_ == 0 || (kind_ == Kind::Dense ? bits_ != nullptr : roaring_ != nullptr);
     }
 
     size_t
@@ -155,6 +198,7 @@ class BitsetView {
             // auto calculate num_filtered_out_ids if not provided
             num_filtered_out_ids_ = get_filtered_out_num_();
         }
+        count_known_ = true;
     }
 
     const uint32_t*
@@ -308,9 +352,13 @@ class BitsetView {
     Kind kind_ = Kind::Dense;
     const uint8_t* bits_ = nullptr;
     const roaring_bitmap_t* roaring_ = nullptr;
+    // Members are destroyed in reverse declaration order. Keep the frozen backing owner alive until after the
+    // CRoaring frozen view stored in owned_roaring_ has been freed.
+    std::shared_ptr<const void> roaring_backing_owner_;
     std::shared_ptr<const roaring_bitmap_t> owned_roaring_;
     size_t num_bits_ = 0;
     size_t num_filtered_out_bits_ = 0;
+    bool count_known_ = false;
 
     // optional. many indexes will share one bitset, requiring offset to distinguish between them.
     //  like multi-chunk brute-force in /src/common/comp/brute_force.cc, or mv-only in /src/index/hnsw/faiss_hnsw.cc

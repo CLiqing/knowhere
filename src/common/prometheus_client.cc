@@ -191,6 +191,40 @@ KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_search_cnt, PROMETHEUS_LABEL_CARDINAL)
 KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(re_search_cnt, "number of fallback search per request")
 KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(re_search_cnt, PROMETHEUS_LABEL_CARDINAL)
 
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_filter_prepare_cnt, "filtered BF valid-id preparations per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_filter_prepare_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_filter_cache_hit_cnt, "filtered BF valid-id cache hits per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_filter_cache_hit_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_distance_attempt_cnt, "filtered BF distance attempts per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_distance_attempt_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_scan_all_query_cnt, "filtered BF scan-all queries per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_scan_all_query_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_scan_filter_query_cnt, "filtered BF filter-scan queries per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_scan_filter_query_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_scan_by_valid_ids_query_cnt,
+                                            "filtered BF valid-id-scan queries per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_scan_by_valid_ids_query_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_dense_per_query_scan_cnt,
+                                            "Dense per-query filtered BF scans per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_dense_per_query_scan_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_roaring_per_query_scan_cnt,
+                                            "Roaring per-query filtered BF scans per request")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_roaring_per_query_scan_cnt, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_filter_prepare_latency,
+                                            "filtered BF valid-id preparation latency in milliseconds")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_filter_prepare_latency, PROMETHEUS_LABEL_CARDINAL)
+
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(bf_search_latency, "filtered BF search latency in milliseconds")
+KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(bf_search_latency, PROMETHEUS_LABEL_CARDINAL)
+
 KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(filter_connectivity_ratio,
                                             "avg connectivity ratio set under filtering per request")
 KNOWHERE_DEFINE_PROMETHEUS_HISTOGRAM(filter_connectivity_ratio, PROMETHEUS_LABEL_CARDINAL)
