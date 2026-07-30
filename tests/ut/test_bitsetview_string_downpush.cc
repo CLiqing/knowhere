@@ -172,3 +172,48 @@ TEST_CASE("BitsetView raw string lookup uses uniform chunks") {
     CHECK_FALSE(view.test(3));
     CHECK(view.test(4));
 }
+
+TEST_CASE("BitsetView evaluates STL_SORT dictionary IDs for EQ and NE") {
+    static constexpr std::array<int32_t, 6> row_ids = {2, 0, -1, 1, 2, 0};
+    static constexpr std::array<uint8_t, 1> bits = {0};
+
+    auto make_view = [&](knowhere::BitsetView::ExtraScalarInt64PredicateOp op,
+                         int32_t target_id,
+                         bool target_found) {
+        knowhere::BitsetView view(bits.data(), row_ids.size());
+        knowhere::BitsetView::ExtraScalarInt64PredicateFilter filter;
+        filter.value_type = knowhere::BitsetView::ExtraScalarPredicateValueType::kDictionaryId;
+        filter.op = op;
+        filter.row_dictionary_ids = row_ids.data();
+        filter.row_count = row_ids.size();
+        filter.target_dictionary_id = target_id;
+        filter.target_dictionary_id_found = target_found;
+        view.set_extra_scalar_int64_predicate_filter(filter, 0);
+        return view;
+    };
+
+    auto equal = make_view(
+        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, 2, true);
+    CHECK_FALSE(equal.test(0));
+    CHECK(equal.test(1));
+    CHECK(equal.test(2));
+    CHECK_FALSE(equal.test(4));
+
+    auto equal_missing = make_view(
+        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, -1, false);
+    CHECK(equal_missing.test(0));
+    CHECK(equal_missing.test(5));
+
+    auto not_equal = make_view(
+        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, 2, true);
+    CHECK(not_equal.test(0));
+    CHECK_FALSE(not_equal.test(1));
+    CHECK(not_equal.test(2));
+    CHECK_FALSE(not_equal.test(3));
+
+    auto not_equal_missing = make_view(
+        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, -1, false);
+    CHECK_FALSE(not_equal_missing.test(0));
+    CHECK(not_equal_missing.test(2));
+    CHECK_FALSE(not_equal_missing.test(5));
+}

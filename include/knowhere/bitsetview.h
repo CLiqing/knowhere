@@ -51,6 +51,7 @@ class BitsetView {
         kInt64 = 0,
         kFloat = 1,
         kString = 2,
+        kDictionaryId = 3,
     };
 
     struct RawStringColumnView {
@@ -86,6 +87,9 @@ class BitsetView {
         const float* row_float_values = nullptr;
         const float* const* chunk_float_values = nullptr;
         RawStringColumnView string_column;
+        const int32_t* row_dictionary_ids = nullptr;
+        int32_t target_dictionary_id = -1;
+        bool target_dictionary_id_found = false;
         ExtraScalarInt64PredicateOp op = ExtraScalarInt64PredicateOp::kNone;
         int64_t arg0 = 0;
         int64_t arg1 = 0;
@@ -394,8 +398,33 @@ class BitsetView {
                 }
                 return test_string_predicate_(value);
             }
+            case ExtraScalarPredicateValueType::kDictionaryId:
+                return test_dictionary_id_predicate_(out_id);
         }
         return true;
+    }
+
+    bool
+    test_dictionary_id_predicate_(int64_t out_id) const {
+        const auto& filter = extra_scalar_int64_predicate_filter_;
+        if (out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count ||
+            filter.row_dictionary_ids == nullptr) {
+            return true;
+        }
+        const int32_t value_id = filter.row_dictionary_ids[out_id];
+        if (value_id < 0) {
+            return true;
+        }
+        switch (filter.op) {
+            case ExtraScalarInt64PredicateOp::kEqual:
+                return !filter.target_dictionary_id_found ||
+                       value_id != filter.target_dictionary_id;
+            case ExtraScalarInt64PredicateOp::kNotEqual:
+                return filter.target_dictionary_id_found &&
+                       value_id == filter.target_dictionary_id;
+            default:
+                return true;
+        }
     }
 
     bool
