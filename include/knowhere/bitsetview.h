@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -82,6 +83,28 @@ class BitsetView {
         BitsetView bitset(bitmap.get(), num_bits, 0, id_offset);
         bitset.polarity_ = BitsetPolarity::ValidIds;
         bitset.owned_roaring_ = std::move(bitmap);
+        if (num_filtered_out_bits.has_value()) {
+            bitset.set_count(num_filtered_out_bits.value());
+        }
+        return bitset;
+    }
+
+    // Sparse accepted IDs in producer order.  This is intentionally not a
+    // membership bitset: Cardinal's explicit BF path consumes the span
+    // directly, while other index paths must reject it.
+    static BitsetView
+    FromOwnedValidIdList(std::shared_ptr<const std::vector<int32_t>> ids, size_t num_bits,
+                         std::optional<size_t> num_filtered_out_bits = std::nullopt) {
+        if (ids == nullptr) {
+            throw std::invalid_argument("valid-ID list owner must not be null");
+        }
+        BitsetView bitset;
+        bitset.kind_ = Kind::ValidIdList;
+        bitset.polarity_ = BitsetPolarity::ValidIds;
+        bitset.valid_ids_ = ids->data();
+        bitset.valid_ids_count_ = ids->size();
+        bitset.num_bits_ = num_bits;
+        bitset.owned_valid_ids_ = std::move(ids);
         if (num_filtered_out_bits.has_value()) {
             bitset.set_count(num_filtered_out_bits.value());
         }
@@ -177,6 +200,16 @@ class BitsetView {
         return is_roaring() && polarity_ == BitsetPolarity::ValidIds;
     }
 
+    bool
+    is_valid_id_list() const {
+        return kind_ == Kind::ValidIdList;
+    }
+
+    std::span<const int32_t>
+    valid_ids() const {
+        return {valid_ids_, valid_ids_count_};
+    }
+
     BitsetPolarity
     polarity() const {
         return polarity_;
@@ -189,7 +222,10 @@ class BitsetView {
 
     bool
     has_valid_storage() const {
-        return num_bits_ == 0 || (kind_ == Kind::Dense ? bits_ != nullptr : roaring_ != nullptr);
+        return num_bits_ == 0 ||
+               (kind_ == Kind::Dense ? bits_ != nullptr
+                                     : kind_ == Kind::Roaring ? roaring_ != nullptr
+                                                              : valid_ids_ != nullptr || valid_ids_count_ == 0);
     }
 
     size_t
@@ -380,16 +416,19 @@ class BitsetView {
     }
 
  private:
-    enum class Kind { Dense, Roaring };
+    enum class Kind { Dense, Roaring, ValidIdList };
 
     Kind kind_ = Kind::Dense;
     BitsetPolarity polarity_ = BitsetPolarity::FilteredIds;
     const uint8_t* bits_ = nullptr;
     const roaring_bitmap_t* roaring_ = nullptr;
+    const int32_t* valid_ids_ = nullptr;
+    size_t valid_ids_count_ = 0;
     // Members are destroyed in reverse declaration order. Keep the frozen backing owner alive until after the
     // CRoaring frozen view stored in owned_roaring_ has been freed.
     std::shared_ptr<const void> roaring_backing_owner_;
     std::shared_ptr<const roaring_bitmap_t> owned_roaring_;
+    std::shared_ptr<const std::vector<int32_t>> owned_valid_ids_;
     size_t num_bits_ = 0;
     size_t num_filtered_out_bits_ = 0;
     bool count_known_ = false;
