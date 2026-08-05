@@ -195,6 +195,57 @@ class FaissHnswPqConfig : public FaissHnswConfig {
     }
 };
 
+class FaissHnswRaBitQConfig : public FaissHnswConfig {
+ public:
+    // Number of bits per database vector dimension.
+    CFG_INT rbq_bits;
+    // Zero uses the original fp32 query; positive values quantize the query.
+    CFG_INT rbq_bits_query;
+
+    KNOWHERE_DECLARE_CONFIG(FaissHnswRaBitQConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits)
+            .description("number of RaBitQ bits per database vector dimension")
+            .set_default(1)
+            .set_range(1, 9)
+            .for_train()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits_query)
+            .description("number of RaBitQ query bits; 0 keeps the query in fp32")
+            .set_default(0)
+            .set_range(0, 8)
+            .for_search()
+            .for_range_search()
+            .for_iterator();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto base_status = FaissHnswConfig::CheckAndAdjust(param_type, err_msg);
+        if (base_status != Status::success) {
+            return base_status;
+        }
+
+        const auto metric = str_to_lower(metric_type.value_or(knowhere::metric::L2));
+        if (metric != "l2" && metric != "ip") {
+            return HandleError(err_msg, "HNSW_RABITQ only supports L2 and IP metrics", Status::invalid_metric_type);
+        }
+
+        if (rbq_bits.value_or(1) > 1 && rbq_bits_query.value_or(0) > 0) {
+            return HandleError(err_msg, "rbq_bits_query must be 0 when rbq_bits is greater than 1 for HNSW_RABITQ",
+                               Status::invalid_args);
+        }
+
+        if (param_type == PARAM_TYPE::TRAIN && refine_type.has_value() &&
+            !WhetherAcceptableRefineType(refine_type.value())) {
+            return HandleError(err_msg,
+                               "invalid refine type : " + refine_type.value() +
+                                   ", optional types are [sq4u, sq6, sq8, fp16, bf16, fp32, flat]",
+                               Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
+
 class FaissHnswPrqConfig : public FaissHnswConfig {
  public:
     // number of subquantizer splits

@@ -24,27 +24,29 @@
 #include <faiss/cppcontrib/knowhere/invlists/OnDiskInvertedLists.h>
 
 #include <faiss/IndexAdditiveQuantizer.h>
-#include <faiss/IndexIVFRaBitQ.h>
 #include <faiss/IndexIVFPQFastScan.h>
-#include <faiss/impl/RaBitQuantizer.h>
+#include <faiss/IndexIVFRaBitQ.h>
+#include <faiss/IndexPQ.h>
+#include <faiss/IndexPreTransform.h>
+#include <faiss/IndexRaBitQ.h>
+#include <faiss/IndexScalarQuantizer.h>
+#include <faiss/VectorTransform.h>
 #include <faiss/cppcontrib/knowhere/IndexBinaryScalarQuantizer.h>
 #include <faiss/cppcontrib/knowhere/IndexCosine.h>
 #include <faiss/cppcontrib/knowhere/IndexFlat.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSWBinary.h>
+#include <faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h>
 #include <faiss/cppcontrib/knowhere/IndexIVF.h>
 #include <faiss/cppcontrib/knowhere/IndexIVFFlat.h>
 #include <faiss/cppcontrib/knowhere/IndexIVFPQ.h>
 #include <faiss/cppcontrib/knowhere/IndexIVFPQFastScan.h>
 #include <faiss/cppcontrib/knowhere/IndexIVFRaBitQ.h>
-#include <faiss/IndexPQ.h>
-#include <faiss/IndexPreTransform.h>
 #include <faiss/cppcontrib/knowhere/IndexRefine.h>
 #include <faiss/cppcontrib/knowhere/IndexSQ4Uniform.h>
 #include <faiss/cppcontrib/knowhere/IndexScaNN.h>
 #include <faiss/cppcontrib/knowhere/IndexScalarQuantizer.h>
-#include <faiss/IndexScalarQuantizer.h>
-#include <faiss/VectorTransform.h>
+#include <faiss/impl/RaBitQuantizer.h>
 
 #include <faiss/cppcontrib/knowhere/IndexBinaryFlat.h>
 #include <faiss/cppcontrib/knowhere/IndexBinaryIVF.h>
@@ -685,6 +687,41 @@ static void read_RaBitQuantizer(
     }
 }
 
+static void finalize_and_validate_RaBitQ_index(::faiss::IndexRaBitQ* idxq) {
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->metric_type == METRIC_L2 ||
+                    idxq->metric_type == METRIC_INNER_PRODUCT,
+            "IndexRaBitQ only supports L2 and inner product metrics");
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->rabitq.d == static_cast<size_t>(idxq->d) &&
+                    idxq->rabitq.metric_type == idxq->metric_type,
+            "IndexRaBitQ quantizer metadata mismatch");
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->rabitq.nb_bits >= 1 && idxq->rabitq.nb_bits <= 9,
+            "IndexRaBitQ nb_bits must be in [1, 9]");
+
+    const size_t expected_code_size =
+            idxq->rabitq.compute_code_size(idxq->d, idxq->rabitq.nb_bits);
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->rabitq.code_size == expected_code_size,
+            "IndexRaBitQ quantizer code size mismatch");
+    idxq->code_size = expected_code_size;
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->codes.size() ==
+                    static_cast<size_t>(idxq->ntotal) * expected_code_size,
+            "IndexRaBitQ codes size mismatch");
+    FAISS_THROW_IF_NOT_MSG(
+            idxq->center.empty() ||
+                    idxq->center.size() == static_cast<size_t>(idxq->d),
+            "IndexRaBitQ center size mismatch");
+    FAISS_THROW_IF_NOT_FMT(
+            idxq->qb <= 8,
+            "invalid RaBitQ qb=%d (must be in [0, 8])",
+            idxq->qb);
+    // The V1 cppcontrib wire format intentionally has no centered field.
+    idxq->centered = false;
+}
+
 static void read_direct_map(DirectMap* dm, IOReader* f) {
     char maintain_direct_map;
     READ1(maintain_direct_map);
@@ -1082,6 +1119,16 @@ Index* read_index(IOReader* f, int io_flags) {
         } else {
             idx = idxs;
         }
+    } else if (h == fourcc("Ixrq") || h == fourcc("Ixrr")) {
+        auto idxq = std::make_unique<::faiss::IndexRaBitQ>();
+        read_index_header(idxq.get(), f);
+        read_RaBitQuantizer(
+                &idxq->rabitq, f, /*multi_bit=*/h == fourcc("Ixrr"));
+        READVECTOR(idxq->codes);
+        READVECTOR(idxq->center);
+        READ1(idxq->qb);
+        finalize_and_validate_RaBitQ_index(idxq.get());
+        idx = idxq.release();
     } else if (h == fourcc("IvSQ")) { // legacy
         IndexIVFScalarQuantizer* ivsc = new IndexIVFScalarQuantizer();
         std::vector<std::vector<idx_t>> ids;
@@ -1161,11 +1208,17 @@ Index* read_index(IOReader* f, int io_flags) {
         idxrf->own_refine_index = true;
         idx = idxrf;
     } else if (
-            h == fourcc("IHNf") || h == fourcc("IHNp") || h == fourcc("IHNs") ||
-            h == fourcc("IHN2") || h == fourcc("IHNc") || h == fourcc("IHN9") ||
-            h == fourcc("IHN8") || h == fourcc("IHNa") || h == fourcc("IHNb") ||
-            h == fourcc("IHN7") || h == fourcc("IHN6") || h == fourcc("IHN5")) {
+            h == fourcc("IHNr") || h == fourcc("IHNf") || h == fourcc("IHNp") ||
+            h == fourcc("IHNs") || h == fourcc("IHN2") || h == fourcc("IHNc") ||
+            h == fourcc("IHN9") || h == fourcc("IHN8") || h == fourcc("IHNa") ||
+            h == fourcc("IHNb") || h == fourcc("IHN7") || h == fourcc("IHN6") ||
+            h == fourcc("IHN5")) {
         IndexHNSW* idxhnsw = nullptr;
+        std::unique_ptr<IndexHNSWRaBitQ> idxhnsw_rabitq_owner;
+        if (h == fourcc("IHNr")) {
+            idxhnsw_rabitq_owner = std::make_unique<IndexHNSWRaBitQ>();
+            idxhnsw = idxhnsw_rabitq_owner.get();
+        }
         if (h == fourcc("IHNf"))
             idxhnsw = new IndexHNSWFlat();
         if (h == fourcc("IHNp"))
@@ -1198,6 +1251,9 @@ Index* read_index(IOReader* f, int io_flags) {
         read_HNSW(&idxhnsw->hnsw, f);
         idxhnsw->storage = read_index(f, io_flags);
         idxhnsw->own_fields = idxhnsw->storage != nullptr;
+        if (h == fourcc("IHNr")) {
+            dynamic_cast<IndexHNSWRaBitQ*>(idxhnsw)->validate_storage();
+        }
         if (h == fourcc("IHNp") && !(io_flags & IO_FLAG_PQ_SKIP_SDC_TABLE)) {
             dynamic_cast<IndexPQ*>(idxhnsw->storage)->pq.compute_sdc_table();
         }
@@ -1222,7 +1278,7 @@ Index* read_index(IOReader* f, int io_flags) {
             delete idxhnsw;
             idxhnsw = newh;
         }
-        idx = idxhnsw;
+        idx = h == fourcc("IHNr") ? idxhnsw_rabitq_owner.release() : idxhnsw;
     } else if (h == fourcc("IwPf")) {
         ::faiss::IndexIVFPQFastScan* ivpq = new ::faiss::IndexIVFPQFastScan();
         read_ivf_header(ivpq, f);

@@ -29,10 +29,26 @@ struct SearchParametersHNSWWrapper : public faiss::cppcontrib::knowhere::SearchP
     knowhere::feder::hnsw::FederResult* feder = nullptr;
     // filtering parameter
     float kAlpha = 1.0f;
+    // Number of bits used to quantize a RaBitQ query. This is request-local
+    // and must not be copied into IndexRaBitQ::qb, because searches may run
+    // concurrently with different values.
+    uint8_t rbq_bits_query = 0;
 
     inline ~SearchParametersHNSWWrapper() {
     }
 };
+
+// Creates a distance computer for the storage of an HNSW index. RaBitQ
+// indexes use rbq_bits_query without changing the shared index object. The
+// returned distance follows the native metric convention (in particular, IP
+// is not negated).
+faiss::DistanceComputer*
+create_hnsw_native_distance_computer(const faiss::Index* index, uint8_t rbq_bits_query = 0);
+
+// Creates the min-distance distance computer expected by HNSW traversal.
+// Similarity metrics are wrapped in NegativeDistanceComputer.
+faiss::DistanceComputer*
+create_hnsw_traversal_distance_computer(const faiss::Index* index, uint8_t rbq_bits_query = 0);
 
 // TODO:
 // Please note that this particular searcher is int32_t based, so won't

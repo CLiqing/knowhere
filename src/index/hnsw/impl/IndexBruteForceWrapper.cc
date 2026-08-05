@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <memory>
 
+#include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include "knowhere/bitsetview.h"
 #include "knowhere/bitsetview_idselector.h"
 
@@ -56,7 +57,9 @@ IndexBruteForceWrapper::search(faiss::idx_t n, const float* __restrict x, faiss:
                                const faiss::SearchParameters* __restrict params) const {
     FAISS_THROW_IF_NOT(k > 0);
 
-    std::unique_ptr<faiss::DistanceComputer> dis(index->get_distance_computer());
+    const auto* hnsw_params = dynamic_cast<const SearchParametersHNSWWrapper*>(params);
+    const uint8_t rbq_bits_query = (hnsw_params == nullptr) ? 0 : hnsw_params->rbq_bits_query;
+    std::unique_ptr<faiss::DistanceComputer> dis(create_hnsw_native_distance_computer(index, rbq_bits_query));
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
@@ -116,7 +119,9 @@ IndexBruteForceWrapper::range_search(faiss::idx_t n, const float* x, float radiu
     RH_min bres_min(result, radius);
     RH_max bres_max(result, radius);
 
-    std::unique_ptr<faiss::DistanceComputer> dis(index->get_distance_computer());
+    const auto* hnsw_params = dynamic_cast<const SearchParametersHNSWWrapper*>(params);
+    const uint8_t rbq_bits_query = (hnsw_params == nullptr) ? 0 : hnsw_params->rbq_bits_query;
+    std::unique_ptr<faiss::DistanceComputer> dis(create_hnsw_native_distance_computer(index, rbq_bits_query));
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
