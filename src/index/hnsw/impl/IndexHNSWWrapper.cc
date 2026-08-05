@@ -13,6 +13,7 @@
 
 #include <faiss/MetricType.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
+#include <faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h>
 #include <faiss/cppcontrib/knowhere/MetricType.h>
 #include <faiss/cppcontrib/knowhere/impl/Bruteforce.h>
 #include <faiss/cppcontrib/knowhere/impl/HNSW.h>
@@ -43,19 +44,29 @@ namespace knowhere {
  * Utilities
  **************************************************************/
 
-namespace {
-
-// cloned from IndexHNSW.cpp
 faiss::DistanceComputer*
-storage_distance_computer(const faiss::Index* storage) {
-    if (faiss::cppcontrib::knowhere::is_similarity_metric(storage->metric_type)) {
-        return new faiss::NegativeDistanceComputer(storage->get_distance_computer());
-    } else {
-        return storage->get_distance_computer();
+create_hnsw_native_distance_computer(const faiss::Index* index, uint8_t rbq_bits_query) {
+    const auto* index_hnsw = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSW*>(index);
+    FAISS_THROW_IF_NOT_MSG(index_hnsw, "distance-computer owner is not an IndexHNSW");
+
+    if (const auto* index_rabitq = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw)) {
+        return index_rabitq->get_distance_computer(rbq_bits_query, false);
     }
+
+    FAISS_THROW_IF_NOT_MSG(index_hnsw->storage, "No storage index");
+    return index_hnsw->storage->get_distance_computer();
 }
 
-}  // namespace
+faiss::DistanceComputer*
+create_hnsw_traversal_distance_computer(const faiss::Index* index, uint8_t rbq_bits_query) {
+    const auto* index_hnsw = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSW*>(index);
+    FAISS_THROW_IF_NOT_MSG(index_hnsw && index_hnsw->storage, "No HNSW storage index");
+    std::unique_ptr<faiss::DistanceComputer> dis(create_hnsw_native_distance_computer(index_hnsw, rbq_bits_query));
+    if (faiss::cppcontrib::knowhere::is_similarity_metric(index_hnsw->storage->metric_type)) {
+        return new faiss::NegativeDistanceComputer(dis.release());
+    }
+    return dis.release();
+}
 
 /**************************************************************
  * IndexHNSWWrapper implementation
@@ -118,7 +129,8 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    const uint8_t rbq_bits_query = (params == nullptr) ? 0 : params->rbq_bits_query;
+    std::unique_ptr<faiss::DistanceComputer> dis(create_hnsw_traversal_distance_computer(index_hnsw, rbq_bits_query));
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
@@ -271,7 +283,8 @@ IndexHNSWWrapper::range_search(idx_t n, const float* __restrict x, float radius_
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    const uint8_t rbq_bits_query = (params == nullptr) ? 0 : params->rbq_bits_query;
+    std::unique_ptr<faiss::DistanceComputer> dis(create_hnsw_traversal_distance_computer(index_hnsw, rbq_bits_query));
 
     // radius
     float radius = radius_in;
