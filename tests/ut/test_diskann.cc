@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 
+#include "../DiskANN/include/diskann/aux_utils.h"
 #include "../DiskANN/include/diskann/defaults.h"
 #include "../DiskANN/include/diskann/linux_aligned_file_reader.h"
 #include "../DiskANN/include/diskann/pq_flash_index.h"
@@ -128,6 +129,17 @@ TEST_CASE("Valid diskann build params test", "[diskann]") {
         REQUIRE(diskCfg.pq_code_budget_gb == std::max(pq_code_budget_gb, 1.0f * ratio));
         REQUIRE(diskCfg.search_cache_budget_gb == std::max(search_cache_budget_gb, 1.0f * ratio));
     }
+}
+
+TEST_CASE("DiskANN navigation PQ can exceed 512 chunks", "[diskann]") {
+    constexpr size_t rows = 500000;
+    constexpr size_t dim = 1537;
+    constexpr size_t matched_code_bytes = 790;
+
+    REQUIRE(diskann::get_num_pq_chunks(static_cast<double>(rows * matched_code_bytes), rows, dim) ==
+            matched_code_bytes);
+    REQUIRE(diskann::get_num_pq_chunks(static_cast<double>(rows * (dim + 1)), rows, dim) == dim);
+    REQUIRE(diskann::get_num_pq_chunks(0.0, rows, dim) == 1);
 }
 
 TEST_CASE("Invalid diskann params test", "[diskann]") {
