@@ -499,10 +499,28 @@ IndexNodeWithDataViewRefiner<DataType, BaseIndexNode>::Search(const DataSetPtr d
         if (!internal_offset_to_most_external_id_.empty()) {
             size_t num_filtered_out_ids = 0;
             if (!bitset.empty()) {
-                // todo: optimize the calculation
-                for (size_t i = 0; i < new_bitset.size(); i++) {
-                    if (new_bitset.test(i)) {
-                        num_filtered_out_ids += emb_list_offset_->offset[i + 1] - emb_list_offset_->offset[i];
+                if (bitset.data() == nullptr && bitset.has_extra_scalar_int64_predicate_filter()) {
+                    // A scalar-only downpush filter deliberately has no base
+                    // bitmap.  Scanning every row here merely to derive an
+                    // exact path-selection count turns each Graph request
+                    // back into O(N), defeating downpush.  The extra filter
+                    // already carries a sampled filtered-count estimate, so
+                    // project that ratio onto the internal-ID domain.  The
+                    // value is only metadata; actual candidate correctness is
+                    // still decided by the extra predicate in Cardinal.
+                    const auto estimated_outer_filtered = bitset.estimated_count();
+                    const auto internal_count = internal_offset_to_most_external_id_.size();
+                    const auto ratio = static_cast<long double>(estimated_outer_filtered) /
+                                       static_cast<long double>(bitset.size());
+                    num_filtered_out_ids = std::min(
+                        internal_count,
+                        static_cast<size_t>(ratio * static_cast<long double>(internal_count)));
+                } else {
+                    // TODO: optimize the exact base-bitmap calculation.
+                    for (size_t i = 0; i < new_bitset.size(); i++) {
+                        if (new_bitset.test(i)) {
+                            num_filtered_out_ids += emb_list_offset_->offset[i + 1] - emb_list_offset_->offset[i];
+                        }
                     }
                 }
             }
