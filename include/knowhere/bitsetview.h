@@ -154,6 +154,17 @@ class BitsetView {
     }
 
     size_t
+    filtered_out_count_for_index_search() const {
+        if (count() != 0) {
+            return count();
+        }
+        if (bits_ == nullptr && has_extra_scalar_int64_predicate_filter_) {
+            return estimated_count();
+        }
+        return get_filtered_out_num_();
+    }
+
+    size_t
     byte_size() const {
         return (num_bits_ + 8 - 1) >> 3;
     }

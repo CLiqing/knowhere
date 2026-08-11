@@ -230,12 +230,13 @@ TEST_CASE("BitsetView carries row count without an all-visible base bitmap") {
     filter.row_values = values.data();
     filter.row_count = values.size();
     filter.arg0 = 25;
-    view.set_extra_scalar_int64_predicate_filter(filter, 2);
+    view.set_extra_scalar_int64_predicate_filter(filter, 1);
 
     CHECK(view.data() == nullptr);
     CHECK(view.size() == values.size());
     CHECK(view.count() == 0);
-    CHECK(view.estimated_count() == 2);
+    CHECK(view.estimated_count() == 1);
+    CHECK(view.filtered_out_count_for_index_search() == 1);
     CHECK(view.test(0));
     CHECK(view.test(1));
     CHECK_FALSE(view.test(2));

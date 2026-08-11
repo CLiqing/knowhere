@@ -151,8 +151,10 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
 
         BitsetView bitset;
         if (bitset_.count() == 0) {
-            // traverse bitset to get the filtered out num
-            auto filtered_out_num = bitset_.get_filtered_out_num_();
+            // A scalar-only downpush filter has no backing bitmap.  Its
+            // sampled estimate is sufficient for path selection; traversing
+            // every row here would turn Graph search back into O(N).
+            auto filtered_out_num = bitset_.filtered_out_count_for_index_search();
             bitset = BitsetView(bitset_.data(), bitset_.size(), filtered_out_num);
             bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
         } else {
@@ -222,7 +224,8 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = BitsetView(bitset_.data(), bitset_.size(), bitset_.get_filtered_out_num_());
+        auto bitset = BitsetView(bitset_.data(), bitset_.size(),
+                                 bitset_.filtered_out_count_for_index_search());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -263,7 +266,8 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<DataSetPtr>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = BitsetView(bitset_.data(), bitset_.size(), bitset_.get_filtered_out_num_());
+        auto bitset = BitsetView(bitset_.data(), bitset_.size(),
+                                 bitset_.filtered_out_count_for_index_search());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
