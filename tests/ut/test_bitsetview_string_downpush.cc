@@ -217,3 +217,27 @@ TEST_CASE("BitsetView evaluates STL_SORT dictionary IDs for EQ and NE") {
     CHECK(not_equal_missing.test(2));
     CHECK_FALSE(not_equal_missing.test(5));
 }
+
+TEST_CASE("BitsetView carries row count without an all-visible base bitmap") {
+    static constexpr std::array<int64_t, 4> values = {10, 20, 30, 40};
+
+    knowhere::BitsetView view;
+    knowhere::BitsetView::ExtraScalarInt64PredicateFilter filter;
+    filter.value_type =
+        knowhere::BitsetView::ExtraScalarPredicateValueType::kInt64;
+    filter.op =
+        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kGreaterEqual;
+    filter.row_values = values.data();
+    filter.row_count = values.size();
+    filter.arg0 = 25;
+    view.set_extra_scalar_int64_predicate_filter(filter, 2);
+
+    CHECK(view.data() == nullptr);
+    CHECK(view.size() == values.size());
+    CHECK(view.count() == 0);
+    CHECK(view.estimated_count() == 2);
+    CHECK(view.test(0));
+    CHECK(view.test(1));
+    CHECK_FALSE(view.test(2));
+    CHECK_FALSE(view.test(3));
+}

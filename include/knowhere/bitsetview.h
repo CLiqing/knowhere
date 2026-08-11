@@ -200,6 +200,14 @@ class BitsetView {
         extra_scalar_int64_predicate_filter_ = filter;
         has_extra_scalar_int64_predicate_filter_ = true;
         extra_filtered_out_count_ = estimated_filtered_out_count;
+
+        // An all-visible MVCC result has no backing bitmap, but an extra
+        // scalar predicate still needs the total row count for bounds checks,
+        // filter-ratio estimation, and Cardinal path selection.  Preserve
+        // that logical size without materializing an all-zero bitmap.
+        if (bits_ == nullptr && num_bits_ == 0) {
+            num_bits_ = filter.row_count;
+        }
     }
 
     bool
@@ -233,7 +241,10 @@ class BitsetView {
             out_id = out_ids_[out_id];
         }
         // when index is larger than the max_offset, ignore it
-        bool filtered = (out_id >= static_cast<int64_t>(num_bits_)) || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        bool filtered =
+            (out_id >= static_cast<int64_t>(num_bits_)) ||
+            (bits_ != nullptr &&
+             (bits_[out_id >> 3] & (0x1 << (out_id & 0x7))));
         if (!filtered && has_extra_scalar_int64_predicate_filter_) {
             filtered = test_extra_scalar_int64_predicate_filter_(out_id);
         }
@@ -249,6 +260,15 @@ class BitsetView {
     get_filtered_out_num_() const {
         if (empty()) {
             return 0;
+        }
+        if (bits_ == nullptr) {
+            size_t count = 0;
+            for (size_t i = 0; i < size(); ++i) {
+                if (test(i)) {
+                    ++count;
+                }
+            }
+            return count;
         }
         if (out_ids_ != nullptr) {
             // if with id mapping, there is no optimization for the traversal.
