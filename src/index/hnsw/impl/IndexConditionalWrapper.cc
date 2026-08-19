@@ -11,6 +11,8 @@
 
 #include "IndexConditionalWrapper.h"
 
+#include <faiss/IndexPreTransform.h>
+#include <faiss/clone_index.h>
 #include <faiss/cppcontrib/knowhere/IndexCosine.h>
 
 #include <cstddef>
@@ -103,6 +105,24 @@ std::tuple<std::unique_ptr<faiss::Index>, bool>
 create_conditional_hnsw_wrapper(faiss::Index* index, const FaissHnswConfig& hnsw_cfg, const bool whether_bf_search,
                                 const bool whether_to_enable_refine) {
     const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), knowhere::metric::COSINE);
+
+    // Preserve preprocessing around an HNSW index. The temporary wrapper must
+    // own clones of the transforms because IndexPreTransform has a single
+    // ownership flag for both its chain and sub-index.
+    if (auto* index_pt = dynamic_cast<faiss::IndexPreTransform*>(index); index_pt != nullptr) {
+        auto [inner_wrapper, is_refined] = create_conditional_hnsw_wrapper(
+            index_pt->index, hnsw_cfg, whether_bf_search, whether_to_enable_refine);
+        if (inner_wrapper == nullptr) {
+            return {nullptr, false};
+        }
+        auto pt_wrapper = std::make_unique<faiss::IndexPreTransform>(inner_wrapper.release());
+        faiss::Cloner cloner;
+        for (auto it = index_pt->chain.rbegin(); it != index_pt->chain.rend(); ++it) {
+            pt_wrapper->prepend_transform(cloner.clone_VectorTransform(*it));
+        }
+        pt_wrapper->own_fields = true;
+        return {std::move(pt_wrapper), is_refined};
+    }
 
     // check if we have a refine available.
     faiss::cppcontrib::knowhere::IndexRefine* const index_refine =

@@ -130,3 +130,47 @@ TEST_CASE("HNSW TurboQuant supports all full-code bit widths", "[hnsw][turboquan
         REQUIRE(result.has_value());
     }
 }
+
+TEST_CASE("HNSW TurboQuant MSE applies RR and survives serialization", "[hnsw][turboquant][tqmse]") {
+    constexpr int64_t kNb = 512;
+    constexpr int64_t kNq = 16;
+    constexpr int64_t kDim = 32;
+    constexpr int64_t kTopK = 10;
+    auto base = GenDataSet(kNb, kDim, 45);
+    auto query = GenDataSet(kNq, kDim, 87);
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+
+    for (int bits : {3, 4}) {
+        knowhere::Json cfg;
+        cfg[knowhere::meta::DIM] = kDim;
+        cfg[knowhere::meta::METRIC_TYPE] = knowhere::metric::COSINE;
+        cfg[knowhere::indexparam::HNSW_M] = 8;
+        cfg[knowhere::indexparam::EFCONSTRUCTION] = 64;
+        cfg[knowhere::indexparam::EF] = 64;
+        cfg[knowhere::meta::TOPK] = kTopK;
+        cfg[knowhere::indexparam::TURBOQUANT_BITS] = bits;
+
+        auto created = knowhere::IndexFactory::Instance().Create<knowhere::fp32>(
+            knowhere::IndexEnum::INDEX_HNSW_TQMSE, version);
+        REQUIRE(created.has_value());
+        auto index = created.value();
+        REQUIRE(index.Build(base, cfg) == knowhere::Status::success);
+        auto result = index.Search(query, cfg, knowhere::BitsetView{});
+        REQUIRE(result.has_value());
+
+        knowhere::BinarySet binary_set;
+        REQUIRE(index.Serialize(binary_set) == knowhere::Status::success);
+        auto loaded = knowhere::IndexFactory::Instance()
+                          .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_TQMSE, version)
+                          .value();
+        REQUIRE(loaded.Deserialize(binary_set, cfg) == knowhere::Status::success);
+        auto loaded_result = loaded.Search(query, cfg, knowhere::BitsetView{});
+        REQUIRE(loaded_result.has_value());
+
+        const auto* ids = result.value()->GetIds();
+        const auto* loaded_ids = loaded_result.value()->GetIds();
+        for (int64_t i = 0; i < kNq * kTopK; ++i) {
+            REQUIRE(ids[i] == loaded_ids[i]);
+        }
+    }
+}

@@ -20,6 +20,8 @@
 #include <faiss/cppcontrib/knowhere/impl/additional_io.h>
 #include <faiss/cppcontrib/knowhere/utils/Bitset.h>
 #include <faiss/utils/Heap.h>
+#include <faiss/IndexPreTransform.h>
+#include <faiss/VectorTransform.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -3046,8 +3048,9 @@ class BaseFaissRegularIndexHNSWPQNodeTemplate : public BaseFaissRegularIndexHNSW
 // the storage only after graph construction has completed.
 class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSWNode {
  public:
-    BaseFaissRegularIndexHNSWTurboQuantNode(const int32_t& version, const Object& object, DataFormatEnum data_format)
-        : BaseFaissRegularIndexHNSWNode(version, object, data_format) {
+    BaseFaissRegularIndexHNSWTurboQuantNode(const int32_t& version, const Object& object, DataFormatEnum data_format,
+                                            bool tq_mse = false)
+        : BaseFaissRegularIndexHNSWNode(version, object, data_format), tq_mse_(tq_mse) {
     }
 
     static std::unique_ptr<BaseConfig>
@@ -3062,14 +3065,28 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
 
     std::string
     Type() const override {
-        return knowhere::IndexEnum::INDEX_HNSW_TURBOQUANT;
+        return tq_mse_ ? knowhere::IndexEnum::INDEX_HNSW_TQMSE : knowhere::IndexEnum::INDEX_HNSW_TURBOQUANT;
     }
 
  protected:
+    const bool tq_mse_;
     std::unique_ptr<faiss::IndexScalarQuantizer> tmp_index_tq;
+    std::unique_ptr<faiss::RandomRotationMatrix> tmp_rr;
 
     static faiss::ScalarQuantizer::QuantizerType
-    GetTurboQuantType(int bits) {
+    GetTurboQuantType(int bits, bool tq_mse) {
+        if (tq_mse) {
+            switch (bits) {
+                case 2:
+                    return faiss::ScalarQuantizer::QT_2bit_tqmse;
+                case 3:
+                    return faiss::ScalarQuantizer::QT_3bit_tqmse;
+                case 4:
+                    return faiss::ScalarQuantizer::QT_4bit_tqmse;
+                default:
+                    KNOWHERE_THROW_MSG("TurboQuant MSE bits must be in [2, 4]");
+            }
+        }
         switch (bits) {
             case 2:
                 return faiss::ScalarQuantizer::QT_2bit_tq;
@@ -3110,7 +3127,15 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
         }
         const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
         const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
-        const auto qtype = GetTurboQuantType(hnsw_cfg.tq_bits.value());
+        if (tq_mse_ && !is_cosine && metric.value() != faiss::METRIC_INNER_PRODUCT) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_TQMSE currently supports only COSINE or unit-normalized IP";
+            return Status::invalid_metric_type;
+        }
+        if (tq_mse_ && hnsw_cfg.refine.value_or(false)) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_TQMSE refine is not implemented yet";
+            return Status::not_implemented;
+        }
+        const auto qtype = GetTurboQuantType(hnsw_cfg.tq_bits.value(), tq_mse_);
 
         std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> hnsw_index;
         if (is_cosine) {
@@ -3122,6 +3147,10 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             tmp_index_tq = std::make_unique<faiss::IndexScalarQuantizer>(dim, qtype, metric.value());
         }
         hnsw_index->hnsw.efConstruction = hnsw_cfg.efConstruction.value();
+        if (tq_mse_) {
+            tmp_rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+            tmp_rr->init(12345);
+        }
 
         std::unique_ptr<faiss::Index> final_index;
         if (hnsw_cfg.refine.value_or(false) && hnsw_cfg.refine_type.has_value()) {
@@ -3137,7 +3166,8 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
 
         LOG_KNOWHERE_INFO_ << "Training FP32 HNSW graph";
         final_index->train(rows, data);
-        LOG_KNOWHERE_INFO_ << "Training " << hnsw_cfg.tq_bits.value() << "-bit TurboQuant storage";
+        LOG_KNOWHERE_INFO_ << "Training " << hnsw_cfg.tq_bits.value()
+                           << (tq_mse_ ? "-bit RR + TurboQuant MSE storage" : "-bit TurboQuant storage");
         tmp_index_tq->train(rows, data);
         indexes[0] = std::move(final_index);
         return Status::success;
@@ -3168,10 +3198,27 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
                 return status;
             }
 
-            LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows() << " vectors into TurboQuant storage";
-            status = add_to_index(tmp_index_tq.get(), dataset, data_format);
-            if (status != Status::success) {
-                return status;
+            if (tq_mse_) {
+                auto float_ds_ptr = convert_ds_to_float(dataset, data_format);
+                if (float_ds_ptr == nullptr) {
+                    return Status::invalid_args;
+                }
+                const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
+                LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows()
+                                   << " rotated vectors into TurboQuant MSE storage";
+                constexpr int64_t kRotationBatchRows = 4096;
+                std::vector<float> rotated(static_cast<size_t>(kRotationBatchRows) * dataset->GetDim());
+                for (int64_t row = 0; row < dataset->GetRows(); row += kRotationBatchRows) {
+                    const auto rows = std::min(kRotationBatchRows, dataset->GetRows() - row);
+                    tmp_rr->apply_noalloc(rows, data + row * dataset->GetDim(), rotated.data());
+                    tmp_index_tq->add(rows, rotated.data());
+                }
+            } else {
+                LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows() << " vectors into TurboQuant storage";
+                status = add_to_index(tmp_index_tq.get(), dataset, data_format);
+                if (status != Status::success) {
+                    return status;
+                }
             }
 
             faiss::cppcontrib::knowhere::IndexRefine* index_refine =
@@ -3202,6 +3249,16 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             } else {
                 indexes[0] = std::move(index_hnsw_tq);
             }
+            if (tq_mse_) {
+                auto inner_index = indexes[0];
+                auto* rr = tmp_rr.release();
+                auto* index_pt = new faiss::IndexPreTransform(rr, inner_index.get());
+                index_pt->own_fields = false;
+                indexes[0] = std::shared_ptr<faiss::Index>(index_pt, [inner_index, rr](faiss::Index* index) {
+                    delete index;
+                    delete rr;
+                });
+            }
         } catch (const std::exception& e) {
             LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
             return Status::faiss_inner_error;
@@ -3221,6 +3278,24 @@ class BaseFaissRegularIndexHNSWTurboQuantNodeTemplate : public BaseFaissRegularI
     StaticHasRawData(const knowhere::BaseConfig& config, const IndexVersion&) {
         const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(config);
         return has_lossless_refine_index(hnsw_cfg.refine, hnsw_cfg.refine_type, datatype_v<DataType>);
+    }
+};
+
+template <typename DataType>
+class BaseFaissRegularIndexHNSWTurboQuantMseNodeTemplate : public BaseFaissRegularIndexHNSWTurboQuantNode {
+ public:
+    BaseFaissRegularIndexHNSWTurboQuantMseNodeTemplate(const int32_t& version, const Object& object)
+        : BaseFaissRegularIndexHNSWTurboQuantNode(version, object, datatype_v<DataType>, true) {
+    }
+
+    static std::unique_ptr<BaseConfig>
+    StaticCreateConfig() {
+        return std::make_unique<FaissHnswTurboQuantConfig>();
+    }
+
+    static bool
+    StaticHasRawData(const knowhere::BaseConfig&, const IndexVersion&) {
+        return false;
     }
 };
 
@@ -3547,6 +3622,8 @@ KNOWHERE_SIMPLE_REGISTER_DENSE_FLOAT_ALL_GLOBAL(HNSW_PRQ, BaseFaissRegularIndexH
 KNOWHERE_SIMPLE_REGISTER_DENSE_INT_GLOBAL(HNSW_PRQ, BaseFaissRegularIndexHNSWPRQNodeTemplate,
                                           knowhere::feature::MMAP | knowhere::feature::MV | knowhere::feature::EMB_LIST)
 KNOWHERE_SIMPLE_REGISTER_DENSE_FLOAT_ALL_GLOBAL(HNSW_TURBOQUANT, BaseFaissRegularIndexHNSWTurboQuantNodeTemplate,
+                                                knowhere::feature::NONE)
+KNOWHERE_SIMPLE_REGISTER_DENSE_FLOAT_ALL_GLOBAL(HNSW_TQMSE, BaseFaissRegularIndexHNSWTurboQuantMseNodeTemplate,
                                                 knowhere::feature::NONE)
 
 }  // namespace knowhere
