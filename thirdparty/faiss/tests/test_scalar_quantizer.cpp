@@ -545,6 +545,58 @@ TEST(ScalarQuantizer, EDENEncodeDecode) {
     check_eden_roundtrip(32, 8, faiss::ScalarQuantizer::QT_8bit_eden);
 }
 
+TEST(ScalarQuantizer, FullTQSymmetricDistanceMatchesDecodedReference) {
+    constexpr size_t d = 32;
+    constexpr size_t n = 8;
+    std::vector<float> x = make_normalized_vectors(n, d);
+    const std::array<faiss::ScalarQuantizer::QuantizerType, 4> qtypes = {
+            faiss::ScalarQuantizer::QT_2bit_tq,
+            faiss::ScalarQuantizer::QT_3bit_tq,
+            faiss::ScalarQuantizer::QT_4bit_tq,
+            faiss::ScalarQuantizer::QT_5bit_tq};
+
+    for (auto qtype : qtypes) {
+        SCOPED_TRACE(static_cast<int>(qtype));
+        faiss::ScalarQuantizer sq(d, qtype);
+        sq.train(n, x.data());
+        std::vector<uint8_t> codes(sq.code_size * n, 0);
+        sq.compute_codes(x.data(), codes.data(), n);
+        std::vector<float> decoded(n * d);
+        sq.decode(codes.data(), decoded.data(), n);
+
+        for (auto metric : {faiss::METRIC_INNER_PRODUCT, faiss::METRIC_L2}) {
+            SCOPED_TRACE(metric);
+            std::unique_ptr<faiss::ScalarQuantizer::SQDistanceComputer> dc(sq.get_distance_computer(metric));
+            ASSERT_NE(dc, nullptr);
+            dc->codes = codes.data();
+            dc->code_size = sq.code_size;
+
+            for (const auto& pair :
+                     std::array<std::pair<int, int>, 4>{{{0, 0}, {0, 1}, {2, 5}, {7, 3}}}) {
+                const float* a = decoded.data() + pair.first * d;
+                const float* b = decoded.data() + pair.second * d;
+                float reference = 0.0f;
+                for (size_t k = 0; k < d; ++k) {
+                    if (metric == faiss::METRIC_INNER_PRODUCT) {
+                        reference += a[k] * b[k];
+                    } else {
+                        const float delta = a[k] - b[k];
+                        reference += delta * delta;
+                    }
+                }
+                EXPECT_NEAR(dc->symmetric_dis(pair.first, pair.second), reference, 1e-6f);
+                EXPECT_NEAR(
+                        dc->symmetric_dis(pair.first, pair.second),
+                        dc->symmetric_dis(pair.second, pair.first),
+                        1e-6f);
+            }
+            if (metric == faiss::METRIC_L2) {
+                EXPECT_NEAR(dc->symmetric_dis(4, 4), 0.0f, 1e-7f);
+            }
+        }
+    }
+}
+
 TEST(ScalarQuantizer, TQMSEAccuracyOrdering) {
     const size_t d = 32;
     const size_t n = 256;

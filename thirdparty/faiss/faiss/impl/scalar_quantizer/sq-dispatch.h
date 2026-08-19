@@ -105,9 +105,11 @@ struct DCTurboQuantFull : ScalarQuantizer::TurboQuantRefine::DistanceComputer {
     float mse_coeff_s1 = 0;
     float mse_coeff_s01 = 0;
     mutable std::vector<uint8_t> scratch_and;
+    std::vector<float> symmetric_x1;
+    std::vector<float> symmetric_x2;
 
     DCTurboQuantFull(size_t d, const std::vector<float>& trained)
-            : quant(d, trained) {
+            : quant(d, trained), symmetric_x1(d), symmetric_x2(d) {
         qjl_coeff = std::sqrt(M_PI / 2.0f) / static_cast<float>(d);
     }
 
@@ -337,8 +339,24 @@ struct DCTurboQuantFull : ScalarQuantizer::TurboQuantRefine::DistanceComputer {
         }
     }
 
-    float symmetric_dis(idx_t, idx_t) override {
-        FAISS_THROW_MSG("Not implemented");
+    float symmetric_dis(idx_t i, idx_t j) override {
+        const uint8_t* code_i = codes + i * code_size;
+        const uint8_t* code_j = codes + j * code_size;
+        quant.decode_vector(code_i, symmetric_x1.data());
+        quant.decode_vector(code_j, symmetric_x2.data());
+
+        float result = 0.0f;
+        if constexpr (Similarity::metric_type == METRIC_INNER_PRODUCT) {
+            for (size_t k = 0; k < quant.d; ++k) {
+                result += symmetric_x1[k] * symmetric_x2[k];
+            }
+        } else {
+            for (size_t k = 0; k < quant.d; ++k) {
+                const float delta = symmetric_x1[k] - symmetric_x2[k];
+                result += delta * delta;
+            }
+        }
+        return result;
     }
 };
 
