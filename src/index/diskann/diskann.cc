@@ -1046,13 +1046,14 @@ DiskANNIndexNode<DataType>::Search(const DataSetPtr dataset, std::unique_ptr<Con
 
     auto p_id = std::make_unique<int64_t[]>(k * nq);
     auto p_dist = std::make_unique<DistType[]>(k * nq);
+    std::vector<diskann::QueryStats> query_stats(nq);
 
     std::vector<folly::Future<folly::Unit>> futures;
     futures.reserve(nq);
     for (int64_t row = 0; row < nq; ++row) {
         futures.emplace_back(search_pool_->push([&, index = row, p_id_ptr = p_id.get(), p_dist_ptr = p_dist.get()]() {
             knowhere::checkCancellation(op_context);
-            diskann::QueryStats stats;
+            auto& stats = query_stats[index];
             auto approx_distance_computer =
                 IsRaBitQ() ? rabitq_store_->CreateDistanceComputer(rbq_query_bits) : nullptr;
             pq_flash_index_->cached_beam_search(xq + (index * dim), k, lsearch, p_id_ptr + (index * k),
@@ -1066,6 +1067,21 @@ DiskANNIndexNode<DataType>::Search(const DataSetPtr dataset, std::unique_ptr<Con
 
     if (TryDiskANNCall([&]() { WaitAllSuccess(futures); }) != Status::success) {
         return expected<DataSetPtr>::Err(Status::diskann_inner_error, "some search failed");
+    }
+
+    if (IsRaBitQ()) {
+        uint64_t estimates = 0;
+        uint64_t refinements = 0;
+        uint64_t pruned = 0;
+        for (const auto& stats : query_stats) {
+            estimates += stats.n_approx_estimates;
+            refinements += stats.n_approx_refinements;
+            pruned += stats.n_approx_pruned;
+        }
+        const double prune_ratio = estimates == 0 ? 0.0 : static_cast<double>(pruned) / estimates;
+        LOG_KNOWHERE_INFO_ << "DiskANN RaBitQ refinement stats: queries=" << nq << ", estimates=" << estimates
+                           << ", full_distances=" << refinements << ", pruned=" << pruned
+                           << ", prune_ratio=" << prune_ratio;
     }
 
     auto res = GenResultDataSet(nq, k, std::move(p_id), std::move(p_dist));

@@ -381,7 +381,7 @@ if(__X86_64)
 
   add_library(faiss_avx2 OBJECT ${FAISS_AVX2_SRCS} ${FAISS_FASTSCAN_SRCS})
   target_compile_options(faiss_avx2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>: -msse4.2
-                                            -mavx2 -mfma -mf16c -mpopcnt>)
+                                            -mavx2 -mfma -mf16c -mpopcnt -mbmi2>)
   target_compile_definitions(faiss_avx2 PRIVATE COMPILE_SIMD_AVX2)
   target_include_directories(faiss_avx2 PRIVATE ${Boost_INCLUDE_DIRS})
   target_link_libraries(faiss_avx2 PRIVATE milvus-common::milvus-common)
@@ -397,7 +397,8 @@ if(__X86_64)
             -mavx512dq
             -mavx512bw
             -mavx512vl
-            -mpopcnt>)
+            -mpopcnt
+            -mbmi2>)
   target_compile_definitions(faiss_avx512 PRIVATE COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512)
   target_include_directories(faiss_avx512 PRIVATE ${Boost_INCLUDE_DIRS})
   target_link_libraries(faiss_avx512 PRIVATE milvus-common::milvus-common)
@@ -420,7 +421,8 @@ if(__X86_64)
               -mavx512vnni
               -mavx512fp16
               -mavx512bf16
-              -mpopcnt>)
+              -mpopcnt
+              -mbmi2>)
     target_compile_definitions(faiss_avx512_spr PRIVATE
                                COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512 COMPILE_SIMD_AVX512_SPR)
     target_include_directories(faiss_avx512_spr PRIVATE ${Boost_INCLUDE_DIRS})

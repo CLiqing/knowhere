@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <limits>
+#include <numeric>
 #include <string>
 #include <thread>
 
@@ -25,9 +28,11 @@
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/generators/catch_generators.hpp"
 #include "diskann/diskann_gpu.h"
+#include "faiss/utils/rabitq_simd.h"
 #include "filemanager/FileManager.h"
 #include "filemanager/impl/LocalFileManager.h"
 #include "index/diskann/diskann_config.h"
+#include "index/diskann/rabitq_store.h"
 #include "knowhere/comp/brute_force.h"
 #include "knowhere/comp/knowhere_check.h"
 #include "knowhere/expected.h"
@@ -84,6 +89,36 @@ constexpr float kL2RangeAp = 0.9;
 constexpr float kIpRangeAp = 0.9;
 constexpr float kCosineRangeAp = 0.9;
 }  // namespace
+
+TEST_CASE("RaBitQ selected float sum SIMD matches scalar", "[diskann][rabitq][simd]") {
+    const std::vector<size_t> dimensions = {1, 7, 8, 15, 16, 17, 127, 128, 129, 960, 965};
+
+    for (const size_t dim : dimensions) {
+        std::vector<uint8_t> sign_bits((dim + 7) / 8);
+        std::vector<float> values(dim);
+        for (size_t i = 0; i < sign_bits.size(); ++i) {
+            sign_bits[i] = static_cast<uint8_t>((i * 73 + 0x5b) & 0xff);
+        }
+        for (size_t i = 0; i < dim; ++i) {
+            values[i] = static_cast<float>((static_cast<int>(i % 31) - 15) * 0.125 + (i % 7) * 0.003);
+        }
+
+        const float expected = faiss::rabitq::selected_float_sum<faiss::SIMDLevel::NONE>(
+            sign_bits.data(), values.data(), dim);
+
+        if (faiss::SIMDConfig::is_simd_level_available(faiss::SIMDLevel::AVX2)) {
+            const float actual = faiss::rabitq::selected_float_sum<faiss::SIMDLevel::AVX2>(
+                sign_bits.data(), values.data(), dim);
+            REQUIRE(actual == Catch::Approx(expected).epsilon(1e-5));
+        }
+        if (faiss::SIMDConfig::is_simd_level_available(faiss::SIMDLevel::AVX512)) {
+            const float actual = faiss::rabitq::selected_float_sum<faiss::SIMDLevel::AVX512>(
+                sign_bits.data(), values.data(), dim);
+            REQUIRE(actual == Catch::Approx(expected).epsilon(1e-5));
+        }
+    }
+}
+
 TEST_CASE("Valid diskann build params test", "[diskann]") {
     int rows_num = 1000000;
     auto version = GenTestVersionList();
@@ -467,6 +502,46 @@ TEST_CASE("Test DISKANN_RABITQ phase-1 constraints", "[diskann][rabitq]") {
     invalid = valid;
     invalid["search_cache_budget_gb"] = 0.01;
     check_train_config(invalid, knowhere::Status::invalid_args);
+}
+
+TEST_CASE("Test DISKANN_RABITQ bound refinement", "[diskann][rabitq]") {
+    const auto refinement_dir = kDir + "/rabitq_refinement";
+    const auto data_path = refinement_dir + "/base.fbin";
+    const auto sidecar_path = refinement_dir + "/base_rabitq.index";
+    fs::remove_all(refinement_dir);
+    REQUIRE_NOTHROW(fs::create_directories(refinement_dir));
+
+    constexpr uint32_t rows = 64;
+    constexpr uint32_t dim = 128;
+    auto base_ds = GenDataSet(rows, dim, 30);
+    const auto* base = static_cast<const float*>(base_ds->GetTensor());
+    WriteRawDataToDisk<float>(data_path, base, rows, dim);
+    REQUIRE_NOTHROW(knowhere::RaBitQStore::BuildFromFloatBin(data_path, sidecar_path, 4));
+
+    knowhere::RaBitQStore store(sidecar_path);
+    auto distance_computer = store.CreateDistanceComputer(0);
+    distance_computer->set_query(base);
+    std::vector<unsigned> ids(rows);
+    std::iota(ids.begin(), ids.end(), 0);
+    std::vector<float> distances(rows);
+
+    diskann::QueryStats full_stats;
+    distance_computer->compute_distances(ids.data(), rows, distances.data(),
+                                         std::numeric_limits<float>::max(), false, &full_stats);
+    REQUIRE(full_stats.n_approx_estimates == 0);
+    REQUIRE(full_stats.n_approx_refinements == rows);
+    REQUIRE(full_stats.n_approx_pruned == 0);
+    REQUIRE(std::all_of(distances.begin(), distances.end(), [](float distance) { return std::isfinite(distance); }));
+
+    diskann::QueryStats pruned_stats;
+    distance_computer->compute_distances(ids.data(), rows, distances.data(), 0.0f, true, &pruned_stats);
+    REQUIRE(pruned_stats.n_approx_estimates == rows);
+    REQUIRE(pruned_stats.n_approx_refinements == 0);
+    REQUIRE(pruned_stats.n_approx_pruned == rows);
+    REQUIRE(pruned_stats.n_cmps_saved == rows);
+    REQUIRE(std::all_of(distances.begin(), distances.end(), [](float distance) { return std::isinf(distance); }));
+
+    fs::remove_all(refinement_dir);
 }
 
 TEST_CASE("Test DISKANN_RABITQ build and search", "[diskann][rabitq]") {

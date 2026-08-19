@@ -220,6 +220,30 @@ uint64_t popcount<SIMDLevel::AVX2>(const uint8_t* data, size_t size) {
     return sum;
 }
 
+template <>
+float selected_float_sum<SIMDLevel::AVX2>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    const __m256i bit_positions =
+            _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    __m256 sum = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256i packed = _mm256_set1_epi32(sign_bits[i / 8]);
+        const __m256i selected = _mm256_cmpeq_epi32(
+                _mm256_and_si256(packed, bit_positions), bit_positions);
+        const __m256 values_i = _mm256_loadu_ps(values + i);
+        sum = _mm256_add_ps(sum, _mm256_and_ps(values_i, _mm256_castsi256_ps(selected)));
+    }
+    alignas(32) float lanes[8];
+    _mm256_store_ps(lanes, sum);
+    float result = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
+            lanes[5] + lanes[6] + lanes[7];
+    result += selected_float_sum<SIMDLevel::NONE>(sign_bits + i / 8, values + i, d - i);
+    return result;
+}
+
 } // namespace faiss::rabitq
 
 namespace faiss::rabitq::multibit {

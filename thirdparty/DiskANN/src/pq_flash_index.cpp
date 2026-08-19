@@ -1007,7 +1007,8 @@ namespace diskann {
         const size_t sz = pq_batch_ids.size();
         if (approx_distance_computer != nullptr) {
           approx_distance_computer->compute_distances(
-              pq_batch_ids.data(), sz, dist_scratch);
+              pq_batch_ids.data(), sz, dist_scratch,
+              (std::numeric_limits<float>::max)(), false, stats);
         } else {
           pq_data_getter->aggregate_pq_coords(pq_batch_ids.data(), sz, this->n_chunks, pq_coord_scratch);
           pq_dist_lookup(pq_coord_scratch, sz, this->n_chunks, pq_dists,
@@ -1233,9 +1234,13 @@ namespace diskann {
     auto compute_dists = [this, pq_coord_scratch, pq_dists,
                           approx_distance_computer](const unsigned *ids,
                                                     const _u64 n_ids,
-                                                    float *dists_out) {
+                                                    float *dists_out,
+                                                    float threshold,
+                                                    bool threshold_valid,
+                                                    QueryStats *stats) {
       if (approx_distance_computer != nullptr) {
-        approx_distance_computer->compute_distances(ids, n_ids, dists_out);
+        approx_distance_computer->compute_distances(
+            ids, n_ids, dists_out, threshold, threshold_valid, stats);
       } else {
         aggregate_coords(ids, n_ids, this->data.get(), this->n_chunks,
                          pq_coord_scratch);
@@ -1266,7 +1271,8 @@ namespace diskann {
       }
     }
 
-    compute_dists(&best_medoid, 1, dist_scratch);
+    compute_dists(&best_medoid, 1, dist_scratch,
+                  (std::numeric_limits<float>::max)(), false, stats);
     retset[0].id = best_medoid;
     retset[0].flag = true;
     retset[0].distance = dist_scratch[0];
@@ -1410,7 +1416,12 @@ namespace diskann {
 
         // compute node_nbrs <-> query dists in PQ space
         cpu_timer.reset();
-        compute_dists(node_nbrs, nnbrs, dist_scratch);
+        const bool threshold_valid = cur_list_size == l_search;
+        const float threshold = threshold_valid
+            ? retset[cur_list_size - 1].distance
+            : (std::numeric_limits<float>::max)();
+        compute_dists(node_nbrs, nnbrs, dist_scratch, threshold,
+                      threshold_valid, stats);
         if (stats != nullptr) {
           stats->n_cmps += (double) nnbrs;
           stats->cpu_us += (double) cpu_timer.elapsed();

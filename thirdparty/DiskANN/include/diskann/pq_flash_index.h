@@ -192,7 +192,9 @@ namespace diskann {
     virtual ~ApproxDistanceComputer() = default;
     virtual void set_query(const float* query) = 0;
     virtual void compute_distances(const unsigned* ids, _u64 n_ids,
-                                   float* distances) = 0;
+                                   float* distances, float threshold,
+                                   bool threshold_valid,
+                                   QueryStats* stats) = 0;
   };
 
   template<typename T>

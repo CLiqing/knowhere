@@ -344,6 +344,25 @@ uint64_t popcount<SIMDLevel::AVX512>(const uint8_t* data, size_t size) {
     return sum;
 }
 
+template <>
+float selected_float_sum<SIMDLevel::AVX512>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    __m512 sum = _mm512_setzero_ps();
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        uint16_t packed = 0;
+        memcpy(&packed, sign_bits + i / 8, sizeof(packed));
+        sum = _mm512_add_ps(
+                sum,
+                _mm512_maskz_loadu_ps(static_cast<__mmask16>(packed), values + i));
+    }
+    float result = _mm512_reduce_add_ps(sum);
+    result += selected_float_sum<SIMDLevel::NONE>(sign_bits + i / 8, values + i, d - i);
+    return result;
+}
+
 } // namespace faiss::rabitq
 
 namespace faiss::rabitq::multibit {
@@ -450,6 +469,64 @@ inline float ip_bitplane_avx2(
 }
 #endif // __BMI2__
 
+// AVX-512 bit-plane kernel for ex_bits in [2, 4] (16 dims per iteration).
+// The AVX2 fallback (ip_bitplane_avx2) processes only 8 dims per iteration;
+// using 512-bit vectors with the same bit-plane decomposition roughly doubles
+// the throughput for multi-bit (>= 3 bit) database codes, which is the
+// dominant cost in DiskANN RaBitQ navigation.
+#ifdef __BMI2__
+inline float ip_bitplane_avx512(
+        const uint8_t* __restrict sign_bits,
+        const uint8_t* __restrict ex_code,
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb) {
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 v_one = _mm512_set1_ps(1.0f);
+    const __m512 v_cb = _mm512_set1_ps(cb);
+    const __m512 v_sign_weight = _mm512_set1_ps(
+            static_cast<float>(1u << ex_bits));
+
+    uint64_t pext_masks[4];
+    __m512 v_weights[4];
+    for (size_t b = 0; b < ex_bits; b++) {
+        uint64_t m = 0;
+        for (int j = 0; j < 16; j++) {
+            m |= (1ULL << (j * ex_bits + b));
+        }
+        pext_masks[b] = m;
+        v_weights[b] = _mm512_set1_ps(static_cast<float>(1u << b));
+    }
+
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        uint16_t sb16;
+        memcpy(&sb16, sign_bits + i / 8, sizeof(uint16_t));
+        __m512 recon = _mm512_mul_ps(
+                _mm512_maskz_mov_ps(_cvtu32_mask16(sb16), v_one),
+                v_sign_weight);
+
+        uint64_t ex64 = 0;
+        memcpy(&ex64, ex_code + (i / 8) * ex_bits, sizeof(uint64_t));
+        for (size_t b = 0; b < ex_bits; b++) {
+            uint16_t plane =
+                    static_cast<uint16_t>(_pext_u64(ex64, pext_masks[b]));
+            __m512 p_f =
+                    _mm512_maskz_mov_ps(_cvtu32_mask16(plane), v_one);
+            recon = _mm512_fmadd_ps(p_f, v_weights[b], recon);
+        }
+
+        __m512 rq = _mm512_loadu_ps(rotated_q + i);
+        acc = _mm512_fmadd_ps(rq, _mm512_add_ps(recon, v_cb), acc);
+    }
+
+    float result = _mm512_reduce_add_ps(acc);
+    result += ip_scalar(sign_bits, ex_code, rotated_q, i, d, ex_bits, cb);
+    return result;
+}
+#endif // __BMI2__
+
 } // namespace
 
 template <>
@@ -465,6 +542,10 @@ float compute_inner_product<SIMDLevel::AVX512>(
     }
 
 #ifdef __BMI2__
+    if (ex_bits <= 4) {
+        return ip_bitplane_avx512(
+                sign_bits, ex_code, rotated_q, d, ex_bits, cb);
+    }
     if (ex_bits <= 7) {
         return ip_bitplane_avx2(sign_bits, ex_code, rotated_q, d, ex_bits, cb);
     }

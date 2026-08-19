@@ -18,6 +18,8 @@
 #include <faiss/IndexPreTransform.h>
 #include <faiss/IndexRaBitQ.h>
 #include <faiss/VectorTransform.h>
+#include <faiss/impl/RaBitQUtils.h>
+#include <faiss/impl/RaBitQuantizer.h>
 #include <faiss/index_io.h>
 
 #include "diskann/utils.h"
@@ -59,37 +61,97 @@ ForEachFloatBinBlock(const std::string& data_path, size_t rows, size_t dim, Fn&&
     }
 }
 
+// Single-query rotation application.
+//
+// RandomRotationMatrix::apply_noalloc() routes through OpenBLAS sgemm_, which
+// for a skinny n=1 GEMV spawns an internal worker pool whose launch/packing
+// overhead dominates the actual multiply (observed as a serial-p50 regression
+// when the search worker thread already saturates the CPU). Since DiskANN
+// searches one query at a time, apply the rotation with a plain single-threaded
+// GEMV instead.
+//
+// The stored matrix A is d_in x d_out in column-major order (d_in == d_out == d
+// here), and apply_noalloc computes xt = A^T * x, i.e.
+//   xt[j] = sum_k A[k + j * d] * x[k].
+void
+apply_rotation_single_query(const faiss::RandomRotationMatrix* rotation, const float* x, float* xt) {
+    const int d = rotation->d_in;
+    const float* a = rotation->A.data();
+    for (int j = 0; j < d; ++j) {
+        const float* col = a + j * d;
+        float acc = 0.0f;
+#pragma omp simd reduction(+ : acc)
+        for (int k = 0; k < d; ++k) {
+            acc += col[k] * x[k];
+        }
+        xt[j] = acc;
+    }
+}
+
 class RaBitQApproxDistanceComputer final : public diskann::ApproxDistanceComputer {
  public:
-    RaBitQApproxDistanceComputer(const faiss::IndexPreTransform* pretransform, const faiss::IndexRaBitQ* rabitq,
+    RaBitQApproxDistanceComputer(const faiss::RandomRotationMatrix* rotation, const faiss::IndexRaBitQ* rabitq,
                                  uint8_t query_bits)
-        : pretransform_(pretransform),
-          distance_computer_(rabitq->get_quantized_distance_computer(query_bits, false)) {
+        : rotation_(rotation),
+          rabitq_(rabitq),
+          distance_computer_(rabitq->get_quantized_distance_computer(query_bits, false)),
+          rabitq_distance_computer_(dynamic_cast<faiss::RaBitQDistanceComputer*>(distance_computer_.get())) {
+        if (rabitq_distance_computer_ == nullptr) {
+            throw std::runtime_error("RaBitQ sidecar returned an incompatible distance computer");
+        }
     }
 
     void
     set_query(const float* query) override {
-        const float* transformed = pretransform_->apply_chain(1, query);
-        if (transformed == query) {
-            transformed_query_.reset();
-            distance_computer_->set_query(query);
-        } else {
-            transformed_query_.reset(transformed);
-            distance_computer_->set_query(transformed);
-        }
+        const int d = rotation_->d_in;
+        transformed_query_ = std::make_unique<float[]>(d);
+        apply_rotation_single_query(rotation_, query, transformed_query_.get());
+        distance_computer_->set_query(transformed_query_.get());
     }
 
     void
-    compute_distances(const unsigned* ids, _u64 n_ids, float* distances) override {
+    compute_distances(const unsigned* ids, _u64 n_ids, float* distances, float threshold, bool threshold_valid,
+                      diskann::QueryStats* stats) override {
+        const bool can_prune = threshold_valid && rabitq_->rabitq.nb_bits > 1;
         for (_u64 i = 0; i < n_ids; ++i) {
-            distances[i] = (*distance_computer_)(ids[i]);
+            if (!can_prune) {
+                distances[i] = (*distance_computer_)(ids[i]);
+                if (stats != nullptr && rabitq_->rabitq.nb_bits > 1) {
+                    ++stats->n_approx_refinements;
+                }
+                continue;
+            }
+
+            const uint8_t* code = rabitq_->codes.data() + static_cast<size_t>(ids[i]) * rabitq_->code_size;
+            const float estimate = rabitq_distance_computer_->distance_to_code_1bit(code);
+            const size_t sign_code_size = (static_cast<size_t>(rabitq_->d) + 7) / 8;
+            const auto* factors = reinterpret_cast<const faiss::rabitq_utils::SignBitFactorsWithError*>(
+                code + sign_code_size);
+            if (stats != nullptr) {
+                ++stats->n_approx_estimates;
+            }
+            if (!faiss::rabitq_utils::should_refine_candidate(estimate, factors->f_error,
+                                                              rabitq_distance_computer_->g_error, threshold, false)) {
+                distances[i] = std::numeric_limits<float>::infinity();
+                if (stats != nullptr) {
+                    ++stats->n_approx_pruned;
+                    ++stats->n_cmps_saved;
+                }
+                continue;
+            }
+            distances[i] = rabitq_distance_computer_->distance_to_code_full(code);
+            if (stats != nullptr) {
+                ++stats->n_approx_refinements;
+            }
         }
     }
 
  private:
-    const faiss::IndexPreTransform* pretransform_;
+    const faiss::RandomRotationMatrix* rotation_;
+    const faiss::IndexRaBitQ* rabitq_;
     std::unique_ptr<faiss::FlatCodesDistanceComputer> distance_computer_;
-    std::unique_ptr<const float[]> transformed_query_;
+    faiss::RaBitQDistanceComputer* rabitq_distance_computer_;
+    std::unique_ptr<float[]> transformed_query_;
 };
 
 }  // namespace
@@ -206,7 +268,7 @@ RaBitQStore::CreateDistanceComputer(uint8_t query_bits) const {
     if (Bits() > 1 && query_bits > 0) {
         throw std::invalid_argument("quantized RaBitQ queries currently require 1-bit database codes");
     }
-    return std::make_unique<RaBitQApproxDistanceComputer>(pretransform_, rabitq_, query_bits);
+    return std::make_unique<RaBitQApproxDistanceComputer>(rotation_, rabitq_, query_bits);
 }
 
 int64_t
