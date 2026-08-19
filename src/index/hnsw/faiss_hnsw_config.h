@@ -195,6 +195,44 @@ class FaissHnswPqConfig : public FaissHnswConfig {
     }
 };
 
+class FaissHnswTurboQuantConfig : public FaissHnswConfig {
+ public:
+    CFG_INT tq_bits;
+    CFG_INT tq_query_bits;
+    CFG_BOOL tq_int_qjl;
+
+    KNOWHERE_DECLARE_CONFIG(FaissHnswTurboQuantConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(tq_bits)
+            .description("TurboQuant database bits per dimension")
+            .set_default(2)
+            .set_range(2, 5)
+            .for_train()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(tq_query_bits)
+            .description("TurboQuant query bits; zero selects the floating-point scoring path")
+            .set_default(0)
+            .set_range(0, 8)
+            .for_search();
+        KNOWHERE_CONFIG_DECLARE_FIELD(tq_int_qjl)
+            .description("use integer scoring for the TurboQuant QJL stage")
+            .set_default(false)
+            .for_search();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto base_status = FaissHnswConfig::CheckAndAdjust(param_type, err_msg);
+        if (base_status != Status::success) {
+            return base_status;
+        }
+        if ((param_type == PARAM_TYPE::SEARCH || param_type == PARAM_TYPE::RANGE_SEARCH) &&
+            tq_int_qjl.value_or(false) && tq_query_bits.value_or(0) == 0) {
+            return HandleError(err_msg, "tq_int_qjl requires tq_query_bits greater than zero", Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
+
 class FaissHnswPrqConfig : public FaissHnswConfig {
  public:
     // number of subquantizer splits

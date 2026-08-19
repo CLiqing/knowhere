@@ -11,7 +11,9 @@
 
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 
+#include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetricType.h>
+#include <faiss/cppcontrib/knowhere/IndexCosine.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
 #include <faiss/cppcontrib/knowhere/MetricType.h>
 #include <faiss/cppcontrib/knowhere/impl/Bruteforce.h>
@@ -52,6 +54,25 @@ storage_distance_computer(const faiss::Index* storage) {
         return new faiss::NegativeDistanceComputer(storage->get_distance_computer());
     } else {
         return storage->get_distance_computer();
+    }
+}
+
+void
+configure_turboquant_distance_computer(faiss::DistanceComputer* dis, const SearchParametersHNSWWrapper* params) {
+    if (params == nullptr || dis == nullptr) {
+        return;
+    }
+
+    if (auto* negative = dynamic_cast<faiss::NegativeDistanceComputer*>(dis); negative != nullptr) {
+        dis = negative->basedis;
+    }
+    if (auto* cosine = dynamic_cast<faiss::cppcontrib::knowhere::WithCosineNormDistanceComputer*>(dis);
+        cosine != nullptr) {
+        dis = cosine->basedis.get();
+    }
+    if (auto* turboquant = dynamic_cast<faiss::ScalarQuantizer::TurboQuantRefine::DistanceComputer*>(dis);
+        turboquant != nullptr) {
+        turboquant->configure(params->tq_query_bits, params->tq_int_qjl);
     }
 }
 
@@ -119,6 +140,7 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
 
     // create a distance computer
     std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    configure_turboquant_distance_computer(dis.get(), params);
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
@@ -272,6 +294,7 @@ IndexHNSWWrapper::range_search(idx_t n, const float* __restrict x, float radius_
 
     // create a distance computer
     std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    configure_turboquant_distance_computer(dis.get(), params);
 
     // radius
     float radius = radius_in;

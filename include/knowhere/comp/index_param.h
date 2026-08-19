@@ -58,6 +58,7 @@ constexpr const char* INDEX_HNSW = "HNSW";
 constexpr const char* INDEX_HNSW_SQ = "HNSW_SQ";
 constexpr const char* INDEX_HNSW_PQ = "HNSW_PQ";
 constexpr const char* INDEX_HNSW_PRQ = "HNSW_PRQ";
+constexpr const char* INDEX_HNSW_TURBOQUANT = "HNSW_TURBOQUANT";
 
 constexpr const char* INDEX_DISKANN = "DISKANN";
 constexpr const char* INDEX_AISAQ = "AISAQ";
@@ -237,6 +238,9 @@ constexpr const char* HNSW_REFINE_K = "refine_k";
 constexpr const char* HNSW_REFINE_TYPE = "refine_type";
 constexpr const char* SQ_TYPE = "sq_type";  // for IVF_SQ and HNSW_SQ
 constexpr const char* PRQ_NUM = "nrq";      // for PRQ, number of redisual quantizers
+constexpr const char* TURBOQUANT_BITS = "tq_bits";
+constexpr const char* TURBOQUANT_QUERY_BITS = "tq_query_bits";
+constexpr const char* TURBOQUANT_INT_QJL = "tq_int_qjl";
 
 // Sparse Inverted Index Params
 constexpr const char* INVERTED_INDEX_ALGO = "inverted_index_algo";

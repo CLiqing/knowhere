@@ -29,6 +29,9 @@ struct SearchParametersHNSWWrapper : public faiss::cppcontrib::knowhere::SearchP
     knowhere::feder::hnsw::FederResult* feder = nullptr;
     // filtering parameter
     float kAlpha = 1.0f;
+    // Full TurboQuant query-side integer scoring controls.
+    uint8_t tq_query_bits = 0;
+    bool tq_int_qjl = false;
 
     inline ~SearchParametersHNSWWrapper() {
     }

@@ -1416,6 +1416,10 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
         }
+        if (const auto* tq_cfg = dynamic_cast<const FaissHnswTurboQuantConfig*>(cfg.get()); tq_cfg != nullptr) {
+            hnsw_search_params.tq_query_bits = static_cast<uint8_t>(tq_cfg->tq_query_bits.value_or(0));
+            hnsw_search_params.tq_int_qjl = tq_cfg->tq_int_qjl.value_or(false);
+        }
 
         // do not collect HNSW stats
         hnsw_search_params.hnsw_stats = nullptr;
@@ -1709,6 +1713,10 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
 
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
+        }
+        if (const auto* tq_cfg = dynamic_cast<const FaissHnswTurboQuantConfig*>(cfg.get()); tq_cfg != nullptr) {
+            hnsw_search_params.tq_query_bits = static_cast<uint8_t>(tq_cfg->tq_query_bits.value_or(0));
+            hnsw_search_params.tq_int_qjl = tq_cfg->tq_int_qjl.value_or(false);
         }
 
         // do not collect HNSW stats
@@ -3032,6 +3040,190 @@ class BaseFaissRegularIndexHNSWPQNodeTemplate : public BaseFaissRegularIndexHNSW
     }
 };
 
+// Full TurboQuant does not implement symmetric_dis(), which HNSW needs while
+// inserting vertices and pruning graph edges. Build the graph with exact FP32
+// distances first, encode the same vectors into TurboQuant storage, and swap
+// the storage only after graph construction has completed.
+class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSWNode {
+ public:
+    BaseFaissRegularIndexHNSWTurboQuantNode(const int32_t& version, const Object& object, DataFormatEnum data_format)
+        : BaseFaissRegularIndexHNSWNode(version, object, data_format) {
+    }
+
+    static std::unique_ptr<BaseConfig>
+    StaticCreateConfig() {
+        return std::make_unique<FaissHnswTurboQuantConfig>();
+    }
+
+    std::unique_ptr<BaseConfig>
+    CreateConfig() const override {
+        return StaticCreateConfig();
+    }
+
+    std::string
+    Type() const override {
+        return knowhere::IndexEnum::INDEX_HNSW_TURBOQUANT;
+    }
+
+ protected:
+    std::unique_ptr<faiss::IndexScalarQuantizer> tmp_index_tq;
+
+    static faiss::ScalarQuantizer::QuantizerType
+    GetTurboQuantType(int bits) {
+        switch (bits) {
+            case 2:
+                return faiss::ScalarQuantizer::QT_2bit_tq;
+            case 3:
+                return faiss::ScalarQuantizer::QT_3bit_tq;
+            case 4:
+                return faiss::ScalarQuantizer::QT_4bit_tq;
+            case 5:
+                return faiss::ScalarQuantizer::QT_5bit_tq;
+            default:
+                KNOWHERE_THROW_MSG("TurboQuant bits must be in [2, 5]");
+        }
+    }
+
+    Status
+    TrainInternal(const DataSetPtr dataset, const Config& cfg) override {
+        const auto rows = dataset->GetRows();
+        const auto dim = dataset->GetDim();
+        const auto& hnsw_cfg = static_cast<const FaissHnswTurboQuantConfig&>(cfg);
+
+        const auto& scalar_info_map =
+            dataset->Get<std::unordered_map<int64_t, std::vector<std::vector<uint32_t>>>>(meta::SCALAR_INFO);
+        if (!scalar_info_map.empty()) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_TURBOQUANT does not yet support scalar-partitioned construction";
+            return Status::invalid_args;
+        }
+
+        auto metric = Str2FaissMetricType(hnsw_cfg.metric_type.value());
+        if (!metric.has_value()) {
+            LOG_KNOWHERE_ERROR_ << "Invalid metric type: " << hnsw_cfg.metric_type.value();
+            return Status::invalid_metric_type;
+        }
+
+        auto float_ds_ptr = convert_ds_to_float(dataset, data_format);
+        if (float_ds_ptr == nullptr) {
+            LOG_KNOWHERE_ERROR_ << "Unsupported data format";
+            return Status::invalid_args;
+        }
+        const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
+        const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
+        const auto qtype = GetTurboQuantType(hnsw_cfg.tq_bits.value());
+
+        std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> hnsw_index;
+        if (is_cosine) {
+            hnsw_index = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlatCosine>(dim, hnsw_cfg.M.value());
+            tmp_index_tq = std::make_unique<faiss::cppcontrib::knowhere::IndexScalarQuantizerCosine>(dim, qtype);
+        } else {
+            hnsw_index =
+                std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlat>(dim, hnsw_cfg.M.value(), metric.value());
+            tmp_index_tq = std::make_unique<faiss::IndexScalarQuantizer>(dim, qtype, metric.value());
+        }
+        hnsw_index->hnsw.efConstruction = hnsw_cfg.efConstruction.value();
+
+        std::unique_ptr<faiss::Index> final_index;
+        if (hnsw_cfg.refine.value_or(false) && hnsw_cfg.refine_type.has_value()) {
+            auto final_index_cnd = pick_refine_index(data_format, hnsw_cfg.refine_type, std::move(hnsw_index), dim,
+                                                     is_cosine ? faiss::METRIC_INNER_PRODUCT : metric.value());
+            if (!final_index_cnd.has_value()) {
+                return Status::invalid_args;
+            }
+            final_index = std::move(final_index_cnd.value());
+        } else {
+            final_index = std::move(hnsw_index);
+        }
+
+        LOG_KNOWHERE_INFO_ << "Training FP32 HNSW graph";
+        final_index->train(rows, data);
+        LOG_KNOWHERE_INFO_ << "Training " << hnsw_cfg.tq_bits.value() << "-bit TurboQuant storage";
+        tmp_index_tq->train(rows, data);
+        indexes[0] = std::move(final_index);
+        return Status::success;
+    }
+
+    Status
+    AddInternal(const DataSetPtr dataset, const Config&) override {
+        if (isIndexEmpty()) {
+            LOG_KNOWHERE_ERROR_ << "Can not add data to an untrained HNSW_TURBOQUANT index";
+            return Status::empty_index;
+        }
+        if (tmp_index_tq == nullptr) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_TURBOQUANT does not support incremental add after storage finalization";
+            return Status::not_implemented;
+        }
+
+        const auto& scalar_info_map =
+            dataset->Get<std::unordered_map<int64_t, std::vector<std::vector<uint32_t>>>>(meta::SCALAR_INFO);
+        if (!scalar_info_map.empty()) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_TURBOQUANT does not yet support scalar-partitioned construction";
+            return Status::invalid_args;
+        }
+
+        try {
+            LOG_KNOWHERE_INFO_ << "Adding " << dataset->GetRows() << " vectors to FP32 HNSW graph";
+            auto status = add_to_index(indexes[0].get(), dataset, data_format);
+            if (status != Status::success) {
+                return status;
+            }
+
+            LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows() << " vectors into TurboQuant storage";
+            status = add_to_index(tmp_index_tq.get(), dataset, data_format);
+            if (status != Status::success) {
+                return status;
+            }
+
+            faiss::cppcontrib::knowhere::IndexRefine* index_refine =
+                dynamic_cast<faiss::cppcontrib::knowhere::IndexRefine*>(indexes[0].get());
+            auto* index_hnsw = index_refine != nullptr
+                                   ? dynamic_cast<faiss::cppcontrib::knowhere::IndexHNSW*>(index_refine->base_index)
+                                   : dynamic_cast<faiss::cppcontrib::knowhere::IndexHNSW*>(indexes[0].get());
+            if (index_hnsw == nullptr) {
+                KNOWHERE_THROW_MSG("HNSW_TURBOQUANT base index is not an HNSW index");
+            }
+
+            std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> index_hnsw_tq;
+            if (faiss::cppcontrib::knowhere::is_cosine_index(index_hnsw->storage)) {
+                index_hnsw_tq = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWSQCosine>();
+            } else {
+                index_hnsw_tq = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWSQ>();
+            }
+            static_cast<faiss::cppcontrib::knowhere::IndexHNSW&>(*index_hnsw_tq) =
+                static_cast<faiss::cppcontrib::knowhere::IndexHNSW&>(*index_hnsw);
+
+            delete index_hnsw->storage;
+            index_hnsw->storage = nullptr;
+            index_hnsw_tq->storage = tmp_index_tq.release();
+
+            if (index_refine != nullptr) {
+                delete index_refine->base_index;
+                index_refine->base_index = index_hnsw_tq.release();
+            } else {
+                indexes[0] = std::move(index_hnsw_tq);
+            }
+        } catch (const std::exception& e) {
+            LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
+            return Status::faiss_inner_error;
+        }
+        return Status::success;
+    }
+};
+
+template <typename DataType>
+class BaseFaissRegularIndexHNSWTurboQuantNodeTemplate : public BaseFaissRegularIndexHNSWTurboQuantNode {
+ public:
+    BaseFaissRegularIndexHNSWTurboQuantNodeTemplate(const int32_t& version, const Object& object)
+        : BaseFaissRegularIndexHNSWTurboQuantNode(version, object, datatype_v<DataType>) {
+    }
+
+    static bool
+    StaticHasRawData(const knowhere::BaseConfig& config, const IndexVersion&) {
+        const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(config);
+        return has_lossless_refine_index(hnsw_cfg.refine, hnsw_cfg.refine_type, datatype_v<DataType>);
+    }
+};
+
 // this index trains PRQ and HNSW+FLAT separately, then constructs HNSW+PRQ
 class BaseFaissRegularIndexHNSWPRQNode : public BaseFaissRegularIndexHNSWNode {
  public:
@@ -3354,5 +3546,7 @@ KNOWHERE_SIMPLE_REGISTER_DENSE_FLOAT_ALL_GLOBAL(HNSW_PRQ, BaseFaissRegularIndexH
                                                     knowhere::feature::EMB_LIST)
 KNOWHERE_SIMPLE_REGISTER_DENSE_INT_GLOBAL(HNSW_PRQ, BaseFaissRegularIndexHNSWPRQNodeTemplate,
                                           knowhere::feature::MMAP | knowhere::feature::MV | knowhere::feature::EMB_LIST)
+KNOWHERE_SIMPLE_REGISTER_DENSE_FLOAT_ALL_GLOBAL(HNSW_TURBOQUANT, BaseFaissRegularIndexHNSWTurboQuantNodeTemplate,
+                                                knowhere::feature::NONE)
 
 }  // namespace knowhere
