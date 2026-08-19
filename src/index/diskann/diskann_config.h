@@ -195,5 +195,58 @@ class DiskANNConfig : public BaseConfig {
         return Status::success;
     }
 };
+
+class DiskANNRaBitQConfig : public DiskANNConfig {
+ public:
+    CFG_INT rbq_bits;
+    CFG_INT rbq_bits_query;
+
+    KNOWHERE_DECLARE_CONFIG(DiskANNRaBitQConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits)
+            .description("number of RaBitQ bits per database vector dimension")
+            .set_default(1)
+            .set_range(1, 9)
+            .for_train()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits_query)
+            .description("number of RaBitQ query bits; 0 keeps the query in fp32")
+            .set_default(0)
+            .set_range(0, 8)
+            .for_search()
+            .for_range_search()
+            .for_iterator();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto base_status = DiskANNConfig::CheckAndAdjust(param_type, err_msg);
+        if (base_status != Status::success) {
+            return base_status;
+        }
+        const auto metric = metric_type.value_or(knowhere::metric::L2);
+        if (metric != knowhere::metric::L2 && metric != knowhere::metric::IP) {
+            return HandleError(err_msg, "DISKANN_RABITQ supports L2 and IP", Status::invalid_metric_type);
+        }
+        const auto database_bits = rbq_bits.value_or(1);
+        if (database_bits != 1 && database_bits != 2 && database_bits != 4) {
+            return HandleError(err_msg, "DISKANN_RABITQ phase 1 supports rbq_bits in {1, 2, 4}",
+                               Status::invalid_args);
+        }
+        if (rbq_bits_query.value_or(0) != 0) {
+            return HandleError(err_msg, "DISKANN_RABITQ phase 1 requires rbq_bits_query=0", Status::invalid_args);
+        }
+        if (disk_pq_dims.value_or(0) != 0) {
+            return HandleError(err_msg, "DISKANN_RABITQ phase 1 requires disk_pq_dims=0", Status::invalid_args);
+        }
+        if (search_cache_budget_gb.value_or(0.0f) != 0.0f ||
+            search_cache_budget_gb_ratio.value_or(0.0f) != 0.0f) {
+            return HandleError(err_msg, "DISKANN_RABITQ phase 1 does not support node cache", Status::invalid_args);
+        }
+        if (warm_up.value_or(false)) {
+            return HandleError(err_msg, "DISKANN_RABITQ phase 1 does not support warm_up", Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
 }  // namespace knowhere
 #endif /* DISKANN_CONFIG_H */

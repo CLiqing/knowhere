@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <random>
 #include <thread>
@@ -697,7 +698,8 @@ namespace diskann {
   }
 
   template<typename T>
-  int PQFlashIndex<T>::load(uint32_t num_threads, const char *index_prefix) {
+  int PQFlashIndex<T>::load(uint32_t num_threads, const char *index_prefix,
+                            bool load_pq_data) {
     std::string pq_table_bin =
         get_pq_pivots_filename(std::string(index_prefix));
     std::string pq_compressed_vectors =
@@ -727,18 +729,37 @@ namespace diskann {
     this->aligned_dim = ROUND_UP(pq_file_dim, 8);
 
     size_t npts_u64, nchunks_u64;
-    diskann::load_bin<_u8>(pq_compressed_vectors, this->data, npts_u64,
-                           nchunks_u64);
+    if (load_pq_data) {
+      diskann::load_bin<_u8>(pq_compressed_vectors, this->data, npts_u64,
+                             nchunks_u64);
+    } else {
+      get_bin_metadata(pq_compressed_vectors, npts_u64, nchunks_u64);
+      const size_t header_size = 2 * sizeof(uint32_t);
+      if (nchunks_u64 != 0 &&
+          npts_u64 > (std::numeric_limits<size_t>::max() - header_size) /
+                         nchunks_u64) {
+        LOG(ERROR) << "PQ compressed vector metadata overflows file size";
+        return -1;
+      }
+      const size_t expected_size = header_size + npts_u64 * nchunks_u64;
+      if (get_file_size(pq_compressed_vectors) != expected_size) {
+        LOG(ERROR) << "PQ compressed vector file size mismatch for "
+                   << pq_compressed_vectors;
+        return -1;
+      }
+    }
 
     this->num_points = npts_u64;
     this->n_chunks = nchunks_u64;
 
     pq_table.load_pq_centroid_bin(pq_table_bin.c_str(), nchunks_u64);
 
-    LOG(INFO)
-        << "Loaded PQ centroids and in-memory compressed vectors. #points: "
-        << num_points << " #dim: " << data_dim
-        << " #aligned_dim: " << aligned_dim << " #chunks: " << n_chunks;
+    LOG(INFO) << "Loaded PQ centroids and "
+              << (load_pq_data ? "in-memory compressed vectors"
+                               : "compressed-vector metadata only")
+              << ". #points: " << num_points << " #dim: " << data_dim
+              << " #aligned_dim: " << aligned_dim
+              << " #chunks: " << n_chunks;
 
     std::string disk_pq_pivots_path = this->disk_index_file + "_pq_pivots.bin";
     if (file_exists(disk_pq_pivots_path)) {
@@ -942,13 +963,22 @@ namespace diskann {
       IOContext &ctx, QueryStats *stats,
       const knowhere::feder::diskann::FederResultUniq &feder,
       knowhere::BitsetView                             bitset_view,
-	  PQDataGetter* pq_data_getter) {
+	  PQDataGetter* pq_data_getter,
+      ApproxDistanceComputer* approx_distance_computer) {
+    if (approx_distance_computer == nullptr && this->data == nullptr) {
+      throw ANNException(
+          "resident navigation PQ data is unavailable and no external "
+          "distance computer was supplied",
+          -1);
+    }
     auto         query_scratch = &(data.scratch);
     const T     *query = data.scratch.aligned_query_T;
     auto         beam_width = beam_width_param * kRefineBeamWidthFactor;
     const float *query_float = data.scratch.aligned_query_float;
     float       *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
-    pq_table.populate_chunk_distances(query_float, pq_dists);
+    if (approx_distance_computer == nullptr) {
+      pq_table.populate_chunk_distances(query_float, pq_dists);
+    }
     float         *dist_scratch = query_scratch->aligned_dist_scratch;
     _u8           *pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
     constexpr _u32 pq_batch_size = diskann::defaults::MAX_GRAPH_DEGREE;
@@ -975,9 +1005,14 @@ namespace diskann {
 
       if (pq_batch_ids.size() == pq_batch_size || id == num_points - 1) {
         const size_t sz = pq_batch_ids.size();
-        pq_data_getter->aggregate_pq_coords(pq_batch_ids.data(), sz, this->n_chunks, pq_coord_scratch);
-        pq_dist_lookup(pq_coord_scratch, sz, this->n_chunks, pq_dists,
-                       dist_scratch);
+        if (approx_distance_computer != nullptr) {
+          approx_distance_computer->compute_distances(
+              pq_batch_ids.data(), sz, dist_scratch);
+        } else {
+          pq_data_getter->aggregate_pq_coords(pq_batch_ids.data(), sz, this->n_chunks, pq_coord_scratch);
+          pq_dist_lookup(pq_coord_scratch, sz, this->n_chunks, pq_dists,
+                         dist_scratch);
+        }
         for (size_t i = 0; i < sz; ++i) {
           pq_max_heap.Push(dist_scratch[i], pq_batch_ids[i]);
         }
@@ -1087,7 +1122,14 @@ namespace diskann {
       const T *query1, const _u64 k_search, const _u64 l_search, _s64 *indices,
       float *distances, const _u64 beam_width, const bool use_reorder_data,
       QueryStats *stats, const knowhere::feder::diskann::FederResultUniq &feder,
-      knowhere::BitsetView bitset_view, const float filter_ratio_in) {
+      knowhere::BitsetView bitset_view, const float filter_ratio_in,
+      ApproxDistanceComputer* approx_distance_computer) {
+    if (approx_distance_computer == nullptr && this->data == nullptr) {
+      throw ANNException(
+          "resident navigation PQ data is unavailable and no external "
+          "distance computer was supplied",
+          -1);
+    }
     if (beam_width > defaults::MAX_N_SECTOR_READS)
       throw ANNException("Beamwidth can not be higher than MAX_N_SECTOR_READS",
                          -1, __FUNCSIG__, __FILE__, __LINE__);
@@ -1106,6 +1148,11 @@ namespace diskann {
     }
     float query_norm = query_norm_opt.value();
     auto  ctx = this->reader->get_ctx();
+
+    if (approx_distance_computer != nullptr) {
+      approx_distance_computer->set_query(
+          data.scratch.aligned_query_float);
+    }
 
     size_t bv_cnt = 0;
 
@@ -1129,7 +1176,8 @@ namespace diskann {
 
       if (bv_cnt >= bitset_view.size() * filter_threshold) {
         brute_force_beam_search(data, query_norm, k_search, indices, distances,
-                                beam_width, ctx, stats, feder, bitset_view, this);
+                                beam_width, ctx, stats, feder, bitset_view, this,
+                                approx_distance_computer);
         this->thread_data.push(data);
         this->thread_data.push_notify_all();
         this->reader->put_ctx(ctx);
@@ -1140,7 +1188,8 @@ namespace diskann {
     // Turn to BF is k_search is too large
     if (k_search > 0.5 * (num_points - bv_cnt)) {
       brute_force_beam_search(data, query_norm, k_search, indices, distances,
-                              beam_width, ctx, stats, feder, bitset_view, this);
+                              beam_width, ctx, stats, feder, bitset_view, this,
+                              approx_distance_computer);
       this->thread_data.push(data);
       this->thread_data.push_notify_all();
       this->reader->put_ctx(ctx);
@@ -1172,20 +1221,27 @@ namespace diskann {
 
     // query <-> PQ chunk centers distances
     float *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
-    pq_table.populate_chunk_distances(query_float, pq_dists);
+    if (approx_distance_computer == nullptr) {
+      pq_table.populate_chunk_distances(query_float, pq_dists);
+    }
 
     // query <-> neighbor list
     float *dist_scratch = query_scratch->aligned_dist_scratch;
     _u8   *pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
 
     // lambda to batch compute query<-> node distances in PQ space
-    auto compute_dists = [this, pq_coord_scratch, pq_dists](const unsigned *ids,
-                                                            const _u64 n_ids,
-                                                            float *dists_out) {
-      aggregate_coords(ids, n_ids, this->data.get(), this->n_chunks,
-                       pq_coord_scratch);
-      pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists,
-                     dists_out);
+    auto compute_dists = [this, pq_coord_scratch, pq_dists,
+                          approx_distance_computer](const unsigned *ids,
+                                                    const _u64 n_ids,
+                                                    float *dists_out) {
+      if (approx_distance_computer != nullptr) {
+        approx_distance_computer->compute_distances(ids, n_ids, dists_out);
+      } else {
+        aggregate_coords(ids, n_ids, this->data.get(), this->n_chunks,
+                         pq_coord_scratch);
+        pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists,
+                       dists_out);
+      }
     };
     Timer                 cpu_timer;
     std::vector<Neighbor> retset(l_search + 1);
@@ -1583,7 +1639,7 @@ namespace diskann {
     }
 
     const size_t batch_size = std::min(
-        {AioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
+        {DiskANNAioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
         defaults::MAX_N_SECTOR_READS, sectors_to_visit.size()});
     if (batch_size == 0) {
       this->reader->put_ctx(ctx);
@@ -1702,7 +1758,7 @@ namespace diskann {
     }
 
     const size_t batch_size =
-        std::min(AioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
+        std::min(DiskANNAioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
                  std::min(defaults::MAX_N_SECTOR_READS / 2UL, sectors_to_visit.size()));
     const size_t half_buf_idx = defaults::MAX_N_SECTOR_READS / 2 * read_len_for_node;
     char        *sector_scratch = data.scratch.sector_scratch;
@@ -2041,7 +2097,9 @@ namespace diskann {
     index_mem_size += ROUND_UP(num_medoids * aligned_dim * sizeof(float), 32);
     index_mem_size += num_medoids * aligned_dim * sizeof(uint32_t);
     // get pq data and pq_table:
-    index_mem_size += this->num_points * this->n_chunks * sizeof(uint8_t);
+    if (this->data != nullptr) {
+      index_mem_size += this->num_points * this->n_chunks * sizeof(uint8_t);
+    }
     index_mem_size += this->pq_table.get_total_dims() * 256 * sizeof(float) * 2;
     index_mem_size +=
         this->pq_table.get_total_dims() * (sizeof(uint32_t) + sizeof(float));

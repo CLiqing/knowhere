@@ -41,15 +41,15 @@ static AioInfo readAioInfo() {
     return info;
 }
 
-class AioContextPool {
+class DiskANNAioContextPool {
  public:
-  AioContextPool(const AioContextPool&) = delete;
+  DiskANNAioContextPool(const DiskANNAioContextPool&) = delete;
 
-  AioContextPool& operator=(const AioContextPool&) = delete;
+  DiskANNAioContextPool& operator=(const DiskANNAioContextPool&) = delete;
 
-  AioContextPool(AioContextPool&&) noexcept = delete;
+  DiskANNAioContextPool(DiskANNAioContextPool&&) noexcept = delete;
 
-  AioContextPool& operator==(AioContextPool&&) noexcept = delete;
+  DiskANNAioContextPool& operator==(DiskANNAioContextPool&&) noexcept = delete;
 
   size_t max_events_per_ctx() {
     return max_events_;
@@ -100,7 +100,7 @@ class AioContextPool {
         return true;
   }
 
-  static std::shared_ptr<AioContextPool> GetGlobalAioPool() {
+  static std::shared_ptr<DiskANNAioContextPool> GetGlobalAioPool() {
     if (global_aio_pool_size == 0) {
       std::scoped_lock lk(global_aio_pool_mut);
       if (global_aio_pool_size == 0) {
@@ -112,12 +112,12 @@ class AioContextPool {
             << global_aio_pool_size;
       }
     }
-    static auto pool = std::shared_ptr<AioContextPool>(
-        new AioContextPool(global_aio_pool_size, global_aio_max_events));
+    static auto pool = std::shared_ptr<DiskANNAioContextPool>(
+        new DiskANNAioContextPool(global_aio_pool_size, global_aio_max_events));
     return pool;
   }
 
-  ~AioContextPool() {
+  ~DiskANNAioContextPool() {
     stop_ = true;
     for (auto ctx : ctx_bak_) {
       io_destroy(ctx);
@@ -137,7 +137,7 @@ class AioContextPool {
   inline static size_t           global_aio_max_events = 0;
   inline static std::mutex       global_aio_pool_mut;
 
-  AioContextPool(size_t num_ctx, size_t max_events)
+  DiskANNAioContextPool(size_t num_ctx, size_t max_events)
       : num_ctx_(num_ctx), max_events_(max_events) {
 	AioInfo aio_info = readAioInfo();
 	size_t available_aio = (size_t)(aio_info.aio_max_nr - aio_info.aio_nr);

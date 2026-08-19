@@ -11,11 +11,15 @@
 
 #include <sys/resource.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <string>
 #include <thread>
 
 #include "../DiskANN/include/diskann/defaults.h"
+#include "../DiskANN/include/diskann/linux_aligned_file_reader.h"
+#include "../DiskANN/include/diskann/pq_flash_index.h"
 #include "catch2/catch_approx.hpp"
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/generators/catch_generators.hpp"
@@ -393,6 +397,228 @@ base_search() {
 
 TEST_CASE("Test DiskANNIndexNode.", "[diskann]") {
     base_search<knowhere::fp32>();
+}
+
+TEST_CASE("Test DISKANN_RABITQ phase-1 constraints", "[diskann][rabitq]") {
+    auto version = GenTestVersionList();
+    auto make_pack = []() {
+        std::shared_ptr<milvus::FileManager> file_manager = std::make_shared<milvus::LocalFileManager>();
+        return knowhere::Pack(file_manager);
+    };
+
+    REQUIRE(knowhere::IndexFactory::Instance()
+                .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version,
+                                        make_pack())
+                .has_value());
+    REQUIRE_FALSE(knowhere::IndexFactory::Instance()
+                      .Create<knowhere::fp16>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version,
+                                              make_pack())
+                      .has_value());
+    REQUIRE_FALSE(knowhere::IndexFactory::Instance()
+                      .Create<knowhere::bf16>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version,
+                                              make_pack())
+                      .has_value());
+
+    auto check_train_config = [&](knowhere::Json json, knowhere::Status expected) {
+        auto cfg = knowhere::IndexStaticFaced<knowhere::fp32>::CreateConfig(
+            knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version);
+        std::string msg;
+        REQUIRE(knowhere::Config::Load(*cfg, json, knowhere::PARAM_TYPE::TRAIN, &msg) == expected);
+    };
+
+    knowhere::Json valid = {{"dim", kDim},
+                            {"metric_type", knowhere::metric::L2},
+                            {"index_prefix", kL2IndexPrefix},
+                            {"data_path", kRawDataPath},
+                            {"disk_pq_dims", 0},
+                            {"search_cache_budget_gb", 0},
+                            {"search_cache_budget_gb_ratio", 0},
+                            {"rbq_bits", 1}};
+    check_train_config(valid, knowhere::Status::success);
+    valid["rbq_bits"] = 2;
+    check_train_config(valid, knowhere::Status::success);
+    valid["rbq_bits"] = 4;
+    check_train_config(valid, knowhere::Status::success);
+    valid["rbq_bits"] = 1;
+
+    auto invalid = valid;
+    invalid["metric_type"] = knowhere::metric::IP;
+    check_train_config(invalid, knowhere::Status::success);
+    invalid["metric_type"] = knowhere::metric::COSINE;
+    check_train_config(invalid, knowhere::Status::invalid_metric_type);
+    invalid = valid;
+    invalid["rbq_bits"] = 3;
+    check_train_config(invalid, knowhere::Status::invalid_args);
+    invalid = valid;
+    invalid["disk_pq_dims"] = 16;
+    check_train_config(invalid, knowhere::Status::invalid_args);
+    invalid = valid;
+    invalid["search_cache_budget_gb"] = 0.01;
+    check_train_config(invalid, knowhere::Status::invalid_args);
+}
+
+TEST_CASE("Test DISKANN_RABITQ build and search", "[diskann][rabitq]") {
+    fs::remove_all(kDir);
+    REQUIRE_NOTHROW(fs::create_directories(kDir));
+
+    auto version = GenTestVersionList();
+    auto base_ds = GenDataSet(kNumRows, kDim, 30);
+    auto query_ds = GenDataSet(kNumQueries, kDim, 42);
+    WriteRawDataToDisk<float>(kRawDataPath, static_cast<const float*>(base_ds->GetTensor()), kNumRows, kDim);
+
+    for (const int rbq_bits : {1, 2, 4}) {
+        CAPTURE(rbq_bits);
+        const auto rabitq_dir = kDir + "/rabitq_index_" + std::to_string(rbq_bits);
+        const auto rabitq_prefix = rabitq_dir + "/l2";
+        REQUIRE_NOTHROW(fs::create_directories(rabitq_dir));
+
+        knowhere::Json build_json = {{"dim", kDim},
+                                     {"metric_type", knowhere::metric::L2},
+                                     {"index_prefix", rabitq_prefix},
+                                     {"data_path", kRawDataPath},
+                                     {"max_degree", defaultMaxDegree},
+                                     {"search_list_size", 128},
+                                     {"pq_code_budget_gb", 0.001},
+                                     {"build_dram_budget_gb", 1.0},
+                                     {"disk_pq_dims", 0},
+                                     {"search_cache_budget_gb", 0},
+                                     {"search_cache_budget_gb_ratio", 0},
+                                     {"rbq_bits", rbq_bits}};
+        knowhere::Json deserialize_json = {{"dim", kDim},
+                                           {"metric_type", knowhere::metric::L2},
+                                           {"index_prefix", rabitq_prefix},
+                                           {"search_cache_budget_gb", 0},
+                                           {"search_cache_budget_gb_ratio", 0},
+                                           {"warm_up", false}};
+        knowhere::Json search_json = {{"dim", kDim},
+                                      {"metric_type", knowhere::metric::L2},
+                                      {"k", kK},
+                                      {"search_list_size", 128},
+                                      {"beamwidth", 8},
+                                      {"rbq_bits_query", 0}};
+
+        auto file_manager = std::make_shared<milvus::LocalFileManager>();
+        auto pack = knowhere::Pack(std::shared_ptr<milvus::FileManager>(file_manager));
+        knowhere::BinarySet binset;
+        {
+            auto index = knowhere::IndexFactory::Instance()
+                             .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version, pack)
+                             .value();
+            REQUIRE(index.Build(nullptr, build_json) == knowhere::Status::success);
+            REQUIRE(fs::exists(rabitq_prefix + "_rabitq.index"));
+            REQUIRE(index.Serialize(binset) == knowhere::Status::success);
+        }
+
+        if (rbq_bits == 1) {
+            auto full_reader = std::make_shared<LinuxAlignedFileReader>();
+            diskann::PQFlashIndex<float> full_pq_index(full_reader, diskann::Metric::L2);
+            REQUIRE(full_pq_index.load(1, rabitq_prefix.c_str(), true) == 0);
+
+            auto metadata_reader = std::make_shared<LinuxAlignedFileReader>();
+            diskann::PQFlashIndex<float> metadata_only_index(metadata_reader, diskann::Metric::L2);
+            REQUIRE(metadata_only_index.load(1, rabitq_prefix.c_str(), false) == 0);
+            REQUIRE(metadata_only_index.get_num_points() == full_pq_index.get_num_points());
+            REQUIRE(metadata_only_index.get_data_dim() == full_pq_index.get_data_dim());
+
+            const auto pq_file_size = fs::file_size(rabitq_prefix + "_pq_compressed.bin");
+            const auto pq_code_bytes = pq_file_size - 2 * sizeof(uint32_t);
+            REQUIRE(full_pq_index.cal_size() - metadata_only_index.cal_size() == pq_code_bytes);
+
+            std::array<float, kDim> query{};
+            std::array<int64_t, 1> ids{};
+            std::array<float, 1> distances{};
+            REQUIRE_THROWS(metadata_only_index.cached_beam_search(query.data(), 1, 1, ids.data(), distances.data(),
+                                                                  1));
+        }
+
+        auto index = knowhere::IndexFactory::Instance()
+                         .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version, pack)
+                         .value();
+        REQUIRE(index.Deserialize(binset, deserialize_json) == knowhere::Status::success);
+        REQUIRE(index.Type() == knowhere::IndexEnum::INDEX_DISKANN_RABITQ);
+        auto result = index.Search(query_ds, search_json, nullptr);
+        REQUIRE(result.has_value());
+        auto ground_truth = knowhere::BruteForce::Search<knowhere::fp32>(base_ds, query_ds, search_json, nullptr);
+        REQUIRE(ground_truth.has_value());
+        REQUIRE(GetKNNRecall(*ground_truth.value(), *result.value()) > 0.5f);
+
+        std::vector<uint8_t> empty_bitset_data((kNumRows + 7) / 8, 0);
+        auto empty_bitset_result =
+            index.Search(query_ds, search_json, knowhere::BitsetView(empty_bitset_data.data(), kNumRows));
+        REQUIRE(empty_bitset_result.has_value());
+
+        auto bitset_data = GenerateBitsetWithFirstTbitsSet(kNumRows, 1);
+        auto bitset_result = index.Search(query_ds, search_json, knowhere::BitsetView(bitset_data.data(), kNumRows));
+        REQUIRE_FALSE(bitset_result.has_value());
+        REQUIRE(bitset_result.error() == knowhere::Status::not_implemented);
+        auto iterators = index.AnnIterator(query_ds, search_json, nullptr);
+        REQUIRE_FALSE(iterators.has_value());
+        REQUIRE(iterators.error() == knowhere::Status::not_implemented);
+    }
+
+    fs::remove_all(kDir);
+}
+
+TEST_CASE("Test DISKANN_RABITQ inner product d+1 sidecar", "[diskann][rabitq][ip]") {
+    const auto ip_dir = kDir + "/rabitq_ip_index";
+    const auto ip_prefix = ip_dir + "/ip";
+    fs::remove_all(kDir);
+    REQUIRE_NOTHROW(fs::create_directories(ip_dir));
+
+    auto version = GenTestVersionList();
+    auto base_ds = GenDataSet(kNumRows, kDim, 30);
+    auto query_ds = GenDataSet(kNumQueries, kDim, 42);
+    WriteRawDataToDisk<float>(kRawDataPath, static_cast<const float*>(base_ds->GetTensor()), kNumRows, kDim);
+
+    knowhere::Json build_json = {{"dim", kDim},
+                                 {"metric_type", knowhere::metric::IP},
+                                 {"index_prefix", ip_prefix},
+                                 {"data_path", kRawDataPath},
+                                 {"max_degree", defaultMaxDegree},
+                                 {"search_list_size", 128},
+                                 {"pq_code_budget_gb", 0.001},
+                                 {"build_dram_budget_gb", 1.0},
+                                 {"disk_pq_dims", 0},
+                                 {"search_cache_budget_gb", 0},
+                                 {"search_cache_budget_gb_ratio", 0},
+                                 {"rbq_bits", 4}};
+    knowhere::Json deserialize_json = {{"dim", kDim},
+                                       {"metric_type", knowhere::metric::IP},
+                                       {"index_prefix", ip_prefix},
+                                       {"search_cache_budget_gb", 0},
+                                       {"search_cache_budget_gb_ratio", 0},
+                                       {"warm_up", false}};
+    knowhere::Json search_json = {{"dim", kDim},
+                                  {"metric_type", knowhere::metric::IP},
+                                  {"k", kK},
+                                  {"search_list_size", 128},
+                                  {"beamwidth", 8},
+                                  {"rbq_bits_query", 0}};
+
+    auto file_manager = std::make_shared<milvus::LocalFileManager>();
+    auto pack = knowhere::Pack(std::shared_ptr<milvus::FileManager>(file_manager));
+    knowhere::BinarySet binset;
+    {
+        auto index = knowhere::IndexFactory::Instance()
+                         .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version, pack)
+                         .value();
+        REQUIRE(index.Build(nullptr, build_json) == knowhere::Status::success);
+        REQUIRE(fs::exists(ip_prefix + "_rabitq.index"));
+        REQUIRE_FALSE(fs::exists(ip_prefix + "_prepped_base.bin"));
+        REQUIRE(index.Serialize(binset) == knowhere::Status::success);
+    }
+
+    auto index = knowhere::IndexFactory::Instance()
+                     .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN_RABITQ, version, pack)
+                     .value();
+    REQUIRE(index.Deserialize(binset, deserialize_json) == knowhere::Status::success);
+    auto result = index.Search(query_ds, search_json, nullptr);
+    REQUIRE(result.has_value());
+    auto ground_truth = knowhere::BruteForce::Search<knowhere::fp32>(base_ds, query_ds, search_json, nullptr);
+    REQUIRE(ground_truth.has_value());
+    REQUIRE(GetKNNRecall(*ground_truth.value(), *result.value()) > 0.8f);
+
+    fs::remove_all(kDir);
 }
 
 #ifdef KNOWHERE_WITH_CUVS

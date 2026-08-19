@@ -122,7 +122,7 @@ namespace {
 
 LinuxAlignedFileReader::LinuxAlignedFileReader() {
   this->file_desc = -1;
-  this->ctx_pool_ = AioContextPool::GetGlobalAioPool();
+  this->ctx_pool_ = DiskANNAioContextPool::GetGlobalAioPool();
 }
 
 LinuxAlignedFileReader::~LinuxAlignedFileReader() {

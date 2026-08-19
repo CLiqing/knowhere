@@ -183,6 +183,18 @@ namespace diskann {
 	virtual ~PQDataGetter() {}
   };
 
+  // Optional query-local navigation distance implementation. Ordinary
+  // DiskANN leaves this null and uses its resident PQ codes. Knowhere's
+  // DISKANN_RABITQ supplies one instance per query so shared index state is
+  // never mutated by search-time query quantization settings.
+  class ApproxDistanceComputer {
+   public:
+    virtual ~ApproxDistanceComputer() = default;
+    virtual void set_query(const float* query) = 0;
+    virtual void compute_distances(const unsigned* ids, _u64 n_ids,
+                                   float* distances) = 0;
+  };
+
   template<typename T>
   class PQFlashIndex: public PQDataGetter {
    public:
@@ -191,7 +203,8 @@ namespace diskann {
     ~PQFlashIndex();
 
     // load compressed data, and obtains the handle to the disk-resident index
-    int load(uint32_t num_threads, const char *index_prefix);
+    int load(uint32_t num_threads, const char *index_prefix,
+             bool load_pq_data = true);
 
     virtual void load_cache_list(std::vector<uint32_t> &node_list);
 
@@ -210,7 +223,8 @@ namespace diskann {
         const bool use_reorder_data = false, QueryStats *stats = nullptr,
         const knowhere::feder::diskann::FederResultUniq &feder = nullptr,
         knowhere::BitsetView                             bitset_view = nullptr,
-        const float                                      filter_ratio = -1.0f);
+        const float                                      filter_ratio = -1.0f,
+        ApproxDistanceComputer*                          approx_distance_computer = nullptr);
 
     void calc_dist_by_ids(const T *query, const int64_t *ids, const int64_t n,
                           float *const output_dists);
@@ -293,7 +307,8 @@ namespace diskann {
         IOContext &ctx, QueryStats *stats,
         const knowhere::feder::diskann::FederResultUniq &feder,
         knowhere::BitsetView                             bitset_view,
-		PQDataGetter* pq_data_getter);
+		PQDataGetter* pq_data_getter,
+        ApproxDistanceComputer* approx_distance_computer = nullptr);
 
     // Assign the index of ids to its corresponding sector and if it is in
     // cache, write to the output_data

@@ -131,6 +131,9 @@ namespace diskann {
     uint32_t inline_pq = 0;
     bool rearrange = false;
     int num_entry_points = 0;
+    // Keep the temporary MIPS-to-L2 base until the caller builds auxiliary
+    // indexes that must use the exact same internal d+1 representation.
+    bool keep_preprocessed_base = false;
   };
 
   template<typename T>
