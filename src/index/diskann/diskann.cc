@@ -785,8 +785,10 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
             LOG_KNOWHERE_INFO_ << "Caching " << num_nodes_to_cache << " sample nodes around medoid(s).";
             if (prep_conf.use_bfs_cache.value()) {
                 LOG_KNOWHERE_INFO_ << "Use bfs to generate cache list";
-                if (TryDiskANNCall([&]() { pq_flash_index_->cache_bfs_levels(num_nodes_to_cache, node_list); }) !=
-                    Status::success) {
+                if (TryDiskANNCall([&]() {
+                        pq_flash_index_->cache_bfs_levels(num_nodes_to_cache, node_list,
+                                                          prep_conf.bfs_cache_seed.value());
+                    }) != Status::success) {
                     LOG_KNOWHERE_ERROR_ << "Failed to generate bfs cache for DiskANN.";
                     return Status::diskann_inner_error;
                 }
@@ -805,10 +807,20 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
     }
 
     if (node_list.size() > 0) {
+        const auto size_before_cache = pq_flash_index_->cal_size();
         if (TryDiskANNCall([&]() { pq_flash_index_->load_cache_list(node_list); }) != Status::success) {
             LOG_KNOWHERE_ERROR_ << "Failed to load cache for DiskANN.";
             return Status::diskann_inner_error;
         }
+        const auto size_after_cache = pq_flash_index_->cal_size();
+        uint64_t cache_list_fingerprint = 1469598103934665603ULL;
+        for (const auto node_id : node_list) {
+            cache_list_fingerprint ^= node_id;
+            cache_list_fingerprint *= 1099511628211ULL;
+        }
+        LOG_KNOWHERE_INFO_ << "DiskANN node cache: nodes=" << node_list.size()
+                           << ", bytes=" << size_after_cache - size_before_cache
+                           << ", list_fingerprint=" << cache_list_fingerprint;
     }
 
     // warmup
@@ -1082,6 +1094,28 @@ DiskANNIndexNode<DataType>::Search(const DataSetPtr dataset, std::unique_ptr<Con
         LOG_KNOWHERE_INFO_ << "DiskANN RaBitQ refinement stats: queries=" << nq << ", estimates=" << estimates
                            << ", full_distances=" << refinements << ", pruned=" << pruned
                            << ", prune_ratio=" << prune_ratio;
+    }
+
+    {
+        double total_us = 0.0;
+        double cpu_us = 0.0;
+        double io_us = 0.0;
+        uint64_t n_ios = 0;
+        uint64_t read_size = 0;
+        uint64_t n_cache_hits = 0;
+        for (const auto& stats : query_stats) {
+            total_us += stats.total_us;
+            cpu_us += stats.cpu_us;
+            io_us += stats.io_us;
+            n_ios += stats.n_ios;
+            read_size += stats.read_size;
+            n_cache_hits += stats.n_cache_hits;
+        }
+        const double n = static_cast<double>(nq);
+        LOG_KNOWHERE_INFO_ << "DiskANN search stats: queries=" << nq << ", avg_total_us=" << total_us / n
+                           << ", avg_cpu_us=" << cpu_us / n << ", avg_io_us=" << io_us / n
+                           << ", avg_n_ios=" << n_ios / n << ", avg_cache_hits=" << n_cache_hits / n
+                           << ", total_read_bytes=" << read_size;
     }
 
     auto res = GenResultDataSet(nq, k, std::move(p_id), std::move(p_dist));

@@ -71,6 +71,9 @@ class DiskANNConfig : public BaseConfig {
     // cached the nodes on the search paths; 2. do bfs from the entry point and cache them. The first method is suitable
     // for TopK query heavy circumstances and the second one performed better in range search.
     CFG_BOOL use_bfs_cache;
+    // Optional deterministic seed for BFS cache selection. A negative value
+    // preserves the existing random selection behavior.
+    CFG_INT bfs_cache_seed;
     // The beamwidth to be used for search. This is the maximum number of IO requests each query will issue per
     // iteration of search code. Larger beamwidth will result in fewer IO round-trips per query but might result in
     // slightly higher total number of IO requests to SSD per query. For the highest query throughput with a fixed SSD
@@ -140,6 +143,11 @@ class DiskANNConfig : public BaseConfig {
         KNOWHERE_CONFIG_DECLARE_FIELD(use_bfs_cache)
             .description("should bfs strategy to cache nodes.")
             .set_default(false)
+            .for_deserialize();
+        KNOWHERE_CONFIG_DECLARE_FIELD(bfs_cache_seed)
+            .description("seed for deterministic bfs cache selection; -1 uses a random seed.")
+            .set_default(-1)
+            .set_range(-1, std::numeric_limits<CFG_INT::value_type>::max())
             .for_deserialize();
         KNOWHERE_CONFIG_DECLARE_FIELD(beamwidth)
             .description("the maximum number of IO requests each query will issue per iteration of search code.")
@@ -237,10 +245,6 @@ class DiskANNRaBitQConfig : public DiskANNConfig {
         }
         if (disk_pq_dims.value_or(0) != 0) {
             return HandleError(err_msg, "DISKANN_RABITQ phase 1 requires disk_pq_dims=0", Status::invalid_args);
-        }
-        if (search_cache_budget_gb.value_or(0.0f) != 0.0f ||
-            search_cache_budget_gb_ratio.value_or(0.0f) != 0.0f) {
-            return HandleError(err_msg, "DISKANN_RABITQ phase 1 does not support node cache", Status::invalid_args);
         }
         if (warm_up.value_or(false)) {
             return HandleError(err_msg, "DISKANN_RABITQ phase 1 does not support warm_up", Status::invalid_args);

@@ -501,7 +501,7 @@ TEST_CASE("Test DISKANN_RABITQ phase-1 constraints", "[diskann][rabitq]") {
     check_train_config(invalid, knowhere::Status::invalid_args);
     invalid = valid;
     invalid["search_cache_budget_gb"] = 0.01;
-    check_train_config(invalid, knowhere::Status::invalid_args);
+    check_train_config(invalid, knowhere::Status::success);
 }
 
 TEST_CASE("Test DISKANN_RABITQ bound refinement", "[diskann][rabitq]") {
@@ -577,6 +577,11 @@ TEST_CASE("Test DISKANN_RABITQ build and search", "[diskann][rabitq]") {
                                            {"search_cache_budget_gb", 0},
                                            {"search_cache_budget_gb_ratio", 0},
                                            {"warm_up", false}};
+        if (rbq_bits == 4) {
+            deserialize_json["search_cache_budget_gb"] = 0.00005;
+            deserialize_json["use_bfs_cache"] = true;
+            deserialize_json["bfs_cache_seed"] = 42;
+        }
         knowhere::Json search_json = {{"dim", kDim},
                                       {"metric_type", knowhere::metric::L2},
                                       {"k", kK},

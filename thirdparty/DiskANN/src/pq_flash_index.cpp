@@ -520,9 +520,15 @@ namespace diskann {
 
   template<typename T>
   void PQFlashIndex<T>::cache_bfs_levels(_u64 num_nodes_to_cache,
-                                         std::vector<uint32_t> &node_list) {
-    std::random_device rng;
-    std::mt19937       urng(rng());
+                                         std::vector<uint32_t> &node_list,
+                                         _s64 bfs_seed) {
+    std::mt19937 urng;
+    if (bfs_seed < 0) {
+      std::random_device rng;
+      urng.seed(rng());
+    } else {
+      urng.seed(static_cast<uint32_t>(bfs_seed));
+    }
 
     node_list.clear();
 
@@ -1219,6 +1225,8 @@ namespace diskann {
     std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
         cached_nhoods;
     cached_nhoods.reserve(2 * beam_width);
+    std::vector<std::pair<bool, size_t>> beam_nhood_order;
+    beam_nhood_order.reserve(2 * beam_width);
 
     // query <-> PQ chunk centers distances
     float *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
@@ -1319,6 +1327,7 @@ namespace diskann {
       frontier_nhoods.clear();
       frontier_read_reqs.clear();
       cached_nhoods.clear();
+      beam_nhood_order.clear();
       sector_scratch_idx = 0;
       // find new beam
       _u32 marker = k;
@@ -1333,11 +1342,13 @@ namespace diskann {
             if (iter != nhood_cache.end()) {
               cached_nhoods.push_back(
                   std::make_pair(retset[marker].id, iter->second));
+              beam_nhood_order.emplace_back(true, cached_nhoods.size() - 1);
               if (stats != nullptr) {
                 stats->n_cache_hits++;
               }
             } else {
               frontier.push_back(retset[marker].id);
+              beam_nhood_order.emplace_back(false, frontier.size() - 1);
             }
           }
           retset[marker].flag = false;
@@ -1461,30 +1472,34 @@ namespace diskann {
         }
       };
 
-      // process cached nhoods
-      for (auto &cached_nhood : cached_nhoods) {
-        if (stats != nullptr) {
-          stats->n_hops++;
+      // Preserve the beam order when cache hits and SSD reads are mixed. In
+      // particular, threshold-aware approximate scorers must observe the same
+      // candidate sequence with and without a node cache.
+      for (const auto &[is_cached, nhood_index] : beam_nhood_order) {
+        if (is_cached) {
+          auto &cached_nhood = cached_nhoods[nhood_index];
+          if (stats != nullptr) {
+            stats->n_hops++;
+          }
+          T *node_fp_coords_copy;
+          {
+            std::shared_lock<std::shared_mutex> lock(this->cache_mtx);
+            auto global_cache_iter = coord_cache.find(cached_nhood.first);
+            node_fp_coords_copy = global_cache_iter->second;
+          }
+          process_node(node_fp_coords_copy, cached_nhood.first,
+                       cached_nhood.second.first, cached_nhood.second.second);
+        } else {
+          auto &frontier_nhood = frontier_nhoods[nhood_index];
+          char *node_disk_buf =
+              get_offset_to_node(frontier_nhood.second, frontier_nhood.first);
+          unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+          T        *node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
+          T        *node_fp_coords_copy = data_buf;
+          memcpy(node_fp_coords_copy, node_fp_coords, disk_bytes_per_point);
+          process_node(node_fp_coords_copy, frontier_nhood.first, *node_buf,
+                       node_buf + 1);
         }
-        T *node_fp_coords_copy;
-        {
-          std::shared_lock<std::shared_mutex> lock(this->cache_mtx);
-          auto global_cache_iter = coord_cache.find(cached_nhood.first);
-          node_fp_coords_copy = global_cache_iter->second;
-        }
-        process_node(node_fp_coords_copy, cached_nhood.first,
-                     cached_nhood.second.first, cached_nhood.second.second);
-      }
-
-      for (auto &frontier_nhood : frontier_nhoods) {
-        char *node_disk_buf =
-            get_offset_to_node(frontier_nhood.second, frontier_nhood.first);
-        unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
-        T        *node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
-        T        *node_fp_coords_copy = data_buf;
-        memcpy(node_fp_coords_copy, node_fp_coords, disk_bytes_per_point);
-        process_node(node_fp_coords_copy, frontier_nhood.first, *node_buf,
-                     node_buf + 1);
       }
 
       // update best inserted position

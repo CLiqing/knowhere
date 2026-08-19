@@ -217,7 +217,8 @@ namespace diskann {
                                                        _u64 num_nodes_to_cache);
 
     virtual void cache_bfs_levels(_u64                   num_nodes_to_cache,
-                          std::vector<uint32_t> &node_list);
+                                  std::vector<uint32_t> &node_list,
+                                  _s64                   bfs_seed = -1);
 
     void cached_beam_search(
         const T *query, const _u64 k_search, const _u64 l_search, _s64 *res_ids,
