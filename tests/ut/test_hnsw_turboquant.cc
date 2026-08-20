@@ -14,7 +14,7 @@
 #include "knowhere/index/index_factory.h"
 #include "utils.h"
 
-TEST_CASE("HNSW TurboQuant build, search, and serialization", "[hnsw][turboquant]") {
+TEST_CASE("HNSW Full TurboQuant applies RR and survives serialization", "[hnsw][turboquant]") {
     constexpr int64_t kNb = 512;
     constexpr int64_t kNq = 16;
     constexpr int64_t kDim = 32;
@@ -104,6 +104,26 @@ TEST_CASE("HNSW TurboQuant rejects inconsistent integer QJL settings", "[hnsw][t
 
     auto extra = GenDataSet(1, kDim, 86);
     REQUIRE(index.Add(extra, cfg) == knowhere::Status::not_implemented);
+}
+
+TEST_CASE("HNSW Full TurboQuant rejects refine with outer RR", "[hnsw][turboquant]") {
+    constexpr int64_t kDim = 32;
+    auto base = GenDataSet(128, kDim, 46);
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+
+    knowhere::Json cfg;
+    cfg[knowhere::meta::DIM] = kDim;
+    cfg[knowhere::meta::METRIC_TYPE] = knowhere::metric::IP;
+    cfg[knowhere::indexparam::HNSW_M] = 8;
+    cfg[knowhere::indexparam::EFCONSTRUCTION] = 32;
+    cfg[knowhere::indexparam::TURBOQUANT_BITS] = 4;
+    cfg[knowhere::indexparam::REFINE] = true;
+    cfg[knowhere::indexparam::REFINE_TYPE] = "FP32";
+
+    auto index = knowhere::IndexFactory::Instance()
+                     .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_TURBOQUANT, version)
+                     .value();
+    REQUIRE(index.Build(base, cfg) == knowhere::Status::not_implemented);
 }
 
 TEST_CASE("HNSW TurboQuant supports all full-code bit widths", "[hnsw][turboquant]") {

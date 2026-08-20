@@ -3131,8 +3131,8 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             LOG_KNOWHERE_ERROR_ << "HNSW_TQMSE currently supports only COSINE or unit-normalized IP";
             return Status::invalid_metric_type;
         }
-        if (tq_mse_ && hnsw_cfg.refine.value_or(false)) {
-            LOG_KNOWHERE_ERROR_ << "HNSW_TQMSE refine is not implemented yet";
+        if (hnsw_cfg.refine.value_or(false)) {
+            LOG_KNOWHERE_ERROR_ << "HNSW TurboQuant refine with outer random rotation is not implemented yet";
             return Status::not_implemented;
         }
         const auto qtype = GetTurboQuantType(hnsw_cfg.tq_bits.value(), tq_mse_);
@@ -3147,10 +3147,11 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             tmp_index_tq = std::make_unique<faiss::IndexScalarQuantizer>(dim, qtype, metric.value());
         }
         hnsw_index->hnsw.efConstruction = hnsw_cfg.efConstruction.value();
-        if (tq_mse_) {
-            tmp_rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
-            tmp_rr->init(12345);
-        }
+        // Both Full TurboQuant and TurboQuant MSE require the same outer
+        // random rotation.  Full TurboQuant additionally applies its own QJL
+        // projection to the MSE residual inside the scalar quantizer.
+        tmp_rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+        tmp_rr->init(12345);
 
         std::unique_ptr<faiss::Index> final_index;
         if (hnsw_cfg.refine.value_or(false) && hnsw_cfg.refine_type.has_value()) {
@@ -3167,7 +3168,8 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
         LOG_KNOWHERE_INFO_ << "Training FP32 HNSW graph";
         final_index->train(rows, data);
         LOG_KNOWHERE_INFO_ << "Training " << hnsw_cfg.tq_bits.value()
-                           << (tq_mse_ ? "-bit RR + TurboQuant MSE storage" : "-bit TurboQuant storage");
+                           << (tq_mse_ ? "-bit RR + TurboQuant MSE storage"
+                                       : "-bit RR + Full TurboQuant storage");
         tmp_index_tq->train(rows, data);
         indexes[0] = std::move(final_index);
         return Status::success;
@@ -3198,27 +3200,19 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
                 return status;
             }
 
-            if (tq_mse_) {
-                auto float_ds_ptr = convert_ds_to_float(dataset, data_format);
-                if (float_ds_ptr == nullptr) {
-                    return Status::invalid_args;
-                }
-                const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
-                LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows()
-                                   << " rotated vectors into TurboQuant MSE storage";
-                constexpr int64_t kRotationBatchRows = 4096;
-                std::vector<float> rotated(static_cast<size_t>(kRotationBatchRows) * dataset->GetDim());
-                for (int64_t row = 0; row < dataset->GetRows(); row += kRotationBatchRows) {
-                    const auto rows = std::min(kRotationBatchRows, dataset->GetRows() - row);
-                    tmp_rr->apply_noalloc(rows, data + row * dataset->GetDim(), rotated.data());
-                    tmp_index_tq->add(rows, rotated.data());
-                }
-            } else {
-                LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows() << " vectors into TurboQuant storage";
-                status = add_to_index(tmp_index_tq.get(), dataset, data_format);
-                if (status != Status::success) {
-                    return status;
-                }
+            auto float_ds_ptr = convert_ds_to_float(dataset, data_format);
+            if (float_ds_ptr == nullptr) {
+                return Status::invalid_args;
+            }
+            const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
+            LOG_KNOWHERE_INFO_ << "Encoding " << dataset->GetRows() << " rotated vectors into "
+                               << (tq_mse_ ? "TurboQuant MSE" : "Full TurboQuant") << " storage";
+            constexpr int64_t kRotationBatchRows = 4096;
+            std::vector<float> rotated(static_cast<size_t>(kRotationBatchRows) * dataset->GetDim());
+            for (int64_t row = 0; row < dataset->GetRows(); row += kRotationBatchRows) {
+                const auto rows = std::min(kRotationBatchRows, dataset->GetRows() - row);
+                tmp_rr->apply_noalloc(rows, data + row * dataset->GetDim(), rotated.data());
+                tmp_index_tq->add(rows, rotated.data());
             }
 
             faiss::cppcontrib::knowhere::IndexRefine* index_refine =
@@ -3249,16 +3243,14 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             } else {
                 indexes[0] = std::move(index_hnsw_tq);
             }
-            if (tq_mse_) {
-                auto inner_index = indexes[0];
-                auto* rr = tmp_rr.release();
-                auto* index_pt = new faiss::IndexPreTransform(rr, inner_index.get());
-                index_pt->own_fields = false;
-                indexes[0] = std::shared_ptr<faiss::Index>(index_pt, [inner_index, rr](faiss::Index* index) {
-                    delete index;
-                    delete rr;
-                });
-            }
+            auto inner_index = indexes[0];
+            auto* rr = tmp_rr.release();
+            auto* index_pt = new faiss::IndexPreTransform(rr, inner_index.get());
+            index_pt->own_fields = false;
+            indexes[0] = std::shared_ptr<faiss::Index>(index_pt, [inner_index, rr](faiss::Index* index) {
+                delete index;
+                delete rr;
+            });
         } catch (const std::exception& e) {
             LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
             return Status::faiss_inner_error;
