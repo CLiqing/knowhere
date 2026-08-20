@@ -177,9 +177,7 @@ TEST_CASE("BitsetView evaluates STL_SORT dictionary IDs for EQ and NE") {
     static constexpr std::array<int32_t, 6> row_ids = {2, 0, -1, 1, 2, 0};
     static constexpr std::array<uint8_t, 1> bits = {0};
 
-    auto make_view = [&](knowhere::BitsetView::ExtraScalarInt64PredicateOp op,
-                         int32_t target_id,
-                         bool target_found) {
+    auto make_view = [&](knowhere::BitsetView::ExtraScalarInt64PredicateOp op, int32_t target_id, bool target_found) {
         knowhere::BitsetView view(bits.data(), row_ids.size());
         knowhere::BitsetView::ExtraScalarInt64PredicateFilter filter;
         filter.value_type = knowhere::BitsetView::ExtraScalarPredicateValueType::kDictionaryId;
@@ -192,27 +190,23 @@ TEST_CASE("BitsetView evaluates STL_SORT dictionary IDs for EQ and NE") {
         return view;
     };
 
-    auto equal = make_view(
-        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, 2, true);
+    auto equal = make_view(knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, 2, true);
     CHECK_FALSE(equal.test(0));
     CHECK(equal.test(1));
     CHECK(equal.test(2));
     CHECK_FALSE(equal.test(4));
 
-    auto equal_missing = make_view(
-        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, -1, false);
+    auto equal_missing = make_view(knowhere::BitsetView::ExtraScalarInt64PredicateOp::kEqual, -1, false);
     CHECK(equal_missing.test(0));
     CHECK(equal_missing.test(5));
 
-    auto not_equal = make_view(
-        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, 2, true);
+    auto not_equal = make_view(knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, 2, true);
     CHECK(not_equal.test(0));
     CHECK_FALSE(not_equal.test(1));
     CHECK(not_equal.test(2));
     CHECK_FALSE(not_equal.test(3));
 
-    auto not_equal_missing = make_view(
-        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, -1, false);
+    auto not_equal_missing = make_view(knowhere::BitsetView::ExtraScalarInt64PredicateOp::kNotEqual, -1, false);
     CHECK_FALSE(not_equal_missing.test(0));
     CHECK(not_equal_missing.test(2));
     CHECK_FALSE(not_equal_missing.test(5));
@@ -223,10 +217,8 @@ TEST_CASE("BitsetView carries row count without an all-visible base bitmap") {
 
     knowhere::BitsetView view;
     knowhere::BitsetView::ExtraScalarInt64PredicateFilter filter;
-    filter.value_type =
-        knowhere::BitsetView::ExtraScalarPredicateValueType::kInt64;
-    filter.op =
-        knowhere::BitsetView::ExtraScalarInt64PredicateOp::kGreaterEqual;
+    filter.value_type = knowhere::BitsetView::ExtraScalarPredicateValueType::kInt64;
+    filter.op = knowhere::BitsetView::ExtraScalarInt64PredicateOp::kGreaterEqual;
     filter.row_values = values.data();
     filter.row_count = values.size();
     filter.arg0 = 25;
@@ -241,4 +233,32 @@ TEST_CASE("BitsetView carries row count without an all-visible base bitmap") {
     CHECK(view.test(1));
     CHECK_FALSE(view.test(2));
     CHECK_FALSE(view.test(3));
+}
+
+TEST_CASE("BitsetView maps physical vector rows to logical scalar rows lazily") {
+    static constexpr std::array<int64_t, 4> values = {10, 20, 30, 40};
+    static constexpr std::array<int64_t, 3> physical_to_logical = {2, 0, 3};
+    // Physical row 1 is excluded by the base bitmap. The mapper must affect
+    // only scalar lookup, not base bitmap addressing.
+    static constexpr std::array<uint8_t, 1> bits = {0b00000010};
+
+    auto map_row = [](const void* context, int64_t physical) -> int64_t {
+        const auto* mapping = static_cast<const std::array<int64_t, 3>*>(context);
+        return physical >= 0 && static_cast<size_t>(physical) < mapping->size() ? (*mapping)[physical] : -1;
+    };
+
+    knowhere::BitsetView view(bits.data(), physical_to_logical.size());
+    knowhere::BitsetView::ExtraScalarInt64PredicateFilter filter;
+    filter.value_type = knowhere::BitsetView::ExtraScalarPredicateValueType::kInt64;
+    filter.op = knowhere::BitsetView::ExtraScalarInt64PredicateOp::kGreaterEqual;
+    filter.row_values = values.data();
+    filter.row_count = values.size();
+    filter.arg0 = 25;
+    filter.scalar_row_id_mapper_context = &physical_to_logical;
+    filter.scalar_row_id_mapper = map_row;
+    view.set_extra_scalar_int64_predicate_filter(filter, 1);
+
+    CHECK_FALSE(view.test(0));
+    CHECK(view.test(1));
+    CHECK_FALSE(view.test(2));
 }

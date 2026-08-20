@@ -78,6 +78,8 @@ class BitsetView {
     static_assert(std::is_standard_layout_v<CompiledLikePatternView>);
 
     struct ExtraScalarInt64PredicateFilter {
+        using ScalarRowIdMapper = int64_t (*)(const void*, int64_t);
+
         ExtraScalarPredicateValueType value_type = ExtraScalarPredicateValueType::kInt64;
         const int64_t* row_values = nullptr;
         const int64_t* const* chunk_values = nullptr;
@@ -110,6 +112,11 @@ class BitsetView {
         bool string_terms_sorted = false;
         bool lower_inclusive = true;
         bool upper_inclusive = true;
+        // Optional physical-vector-row -> logical-scalar-row mapping.  This
+        // lets nullable vector indexes keep the scalar source in logical
+        // order without gathering an O(N) copy for every search.
+        const void* scalar_row_id_mapper_context = nullptr;
+        ScalarRowIdMapper scalar_row_id_mapper = nullptr;
     };
 
     BitsetView() = default;
@@ -252,10 +259,8 @@ class BitsetView {
             out_id = out_ids_[out_id];
         }
         // when index is larger than the max_offset, ignore it
-        bool filtered =
-            (out_id >= static_cast<int64_t>(num_bits_)) ||
-            (bits_ != nullptr &&
-             (bits_[out_id >> 3] & (0x1 << (out_id & 0x7))));
+        bool filtered = (out_id >= static_cast<int64_t>(num_bits_)) ||
+                        (bits_ != nullptr && (bits_[out_id >> 3] & (0x1 << (out_id & 0x7))));
         if (!filtered && has_extra_scalar_int64_predicate_filter_) {
             filtered = test_extra_scalar_int64_predicate_filter_(out_id);
         }
@@ -406,6 +411,12 @@ class BitsetView {
     bool
     test_extra_scalar_int64_predicate_filter_(int64_t out_id) const {
         const auto& filter = extra_scalar_int64_predicate_filter_;
+        if (filter.scalar_row_id_mapper != nullptr) {
+            out_id = filter.scalar_row_id_mapper(filter.scalar_row_id_mapper_context, out_id);
+            if (out_id < 0) {
+                return true;
+            }
+        }
         switch (filter.value_type) {
             case ExtraScalarPredicateValueType::kInt64: {
                 int64_t value = 0;
@@ -438,8 +449,7 @@ class BitsetView {
     bool
     test_dictionary_id_predicate_(int64_t out_id) const {
         const auto& filter = extra_scalar_int64_predicate_filter_;
-        if (out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count ||
-            filter.row_dictionary_ids == nullptr) {
+        if (out_id < 0 || static_cast<size_t>(out_id) >= filter.row_count || filter.row_dictionary_ids == nullptr) {
             return true;
         }
         const int32_t value_id = filter.row_dictionary_ids[out_id];
@@ -448,11 +458,9 @@ class BitsetView {
         }
         switch (filter.op) {
             case ExtraScalarInt64PredicateOp::kEqual:
-                return !filter.target_dictionary_id_found ||
-                       value_id != filter.target_dictionary_id;
+                return !filter.target_dictionary_id_found || value_id != filter.target_dictionary_id;
             case ExtraScalarInt64PredicateOp::kNotEqual:
-                return filter.target_dictionary_id_found &&
-                       value_id == filter.target_dictionary_id;
+                return filter.target_dictionary_id_found && value_id == filter.target_dictionary_id;
             default:
                 return true;
         }
