@@ -45,6 +45,14 @@ uint64_t popcount<SIMDLevel::ARM_NEON>(const uint8_t* data, size_t size) {
     return popcount<SIMDLevel::NONE>(data, size);
 }
 
+template <>
+float selected_float_sum<SIMDLevel::ARM_NEON>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    return selected_float_sum<SIMDLevel::NONE>(sign_bits, values, d);
+}
+
 } // namespace faiss::rabitq
 
 namespace faiss::rabitq::multibit {

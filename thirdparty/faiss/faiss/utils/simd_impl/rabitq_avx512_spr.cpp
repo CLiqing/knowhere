@@ -65,6 +65,11 @@ uint64_t bitwise_xor_dot_product<SIMDLevel::AVX512>(
         size_t qb);
 template <>
 uint64_t popcount<SIMDLevel::AVX512>(const uint8_t* data, size_t size);
+template <>
+float selected_float_sum<SIMDLevel::AVX512>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d);
 
 namespace {
 
@@ -400,6 +405,14 @@ uint64_t popcount<SIMDLevel::AVX512_SPR>(const uint8_t* data, size_t size) {
         sum += popcount32(yv);
     }
     return sum;
+}
+
+template <>
+float selected_float_sum<SIMDLevel::AVX512_SPR>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    return selected_float_sum<SIMDLevel::AVX512>(sign_bits, values, d);
 }
 
 } // namespace faiss::rabitq
