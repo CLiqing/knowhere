@@ -60,6 +60,7 @@ constexpr const char* INDEX_HNSW_PQ = "HNSW_PQ";
 constexpr const char* INDEX_HNSW_PRQ = "HNSW_PRQ";
 
 constexpr const char* INDEX_DISKANN = "DISKANN";
+constexpr const char* INDEX_DISKANN_RABITQ = "DISKANN_RABITQ";
 constexpr const char* INDEX_AISAQ = "AISAQ";
 constexpr const char* INDEX_MINHASH_LSH = "MINHASH_LSH";
 
