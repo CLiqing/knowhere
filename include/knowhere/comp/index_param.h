@@ -62,6 +62,7 @@ constexpr const char* INDEX_HNSW_TURBOQUANT = "HNSW_TURBOQUANT";
 constexpr const char* INDEX_HNSW_TQMSE = "HNSW_TQMSE";
 
 constexpr const char* INDEX_DISKANN = "DISKANN";
+constexpr const char* INDEX_DISKANN_RABITQ = "DISKANN_RABITQ";
 constexpr const char* INDEX_AISAQ = "AISAQ";
 constexpr const char* INDEX_MINHASH_LSH = "MINHASH_LSH";
 

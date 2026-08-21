@@ -11,7 +11,7 @@ class LinuxAlignedFileReader : public AlignedFileReader {
   uint64_t     file_sz;
   FileHandle   file_desc;
   io_context_t bad_ctx = (io_context_t) -1;
-  std::shared_ptr<AioContextPool> ctx_pool_;
+  std::shared_ptr<DiskANNAioContextPool> ctx_pool_;
   std::string file_name;
  public:
   LinuxAlignedFileReader();

@@ -14,6 +14,12 @@ def fbin_write(x, fname):
     np.array([n, d], dtype='uint32').tofile(f)
     x.tofile(f)
 
+
+def test_create_diskann_rabitq():
+    version = knowhere.GetCurrentVersion()
+    index = knowhere.CreateIndex("DISKANN_RABITQ", version)
+    assert index is not None
+
 def test_index(gen_data, faiss_ans, recall, error):
     version = knowhere.GetCurrentVersion()
     index_name = "DISKANN"
