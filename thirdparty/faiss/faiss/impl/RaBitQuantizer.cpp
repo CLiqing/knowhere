@@ -247,24 +247,11 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
         // this is the baseline code
         //
         // compute <q,o> using floats
-        float dot_qo = 0;
-        // It was a willful decision (after the discussion) to not to pre-cache
-        //   the sum of all bits, just in order to reduce the overhead per
-        //   vector.
-        uint64_t sum_q = 0;
-
-        for (size_t i = 0; i < d; i++) {
-            // Extract i-th bit
-            bool bit = rabitq_utils::extract_bit_standard(binary_data, i);
-            // accumulate dp
-            dot_qo += bit ? rotated_q[i] : 0;
-            // accumulate sum-of-bits
-            sum_q += bit ? 1 : 0;
-        }
+        const float dot_qo = rabitq::selected_float_sum<SL>(
+                binary_data, rotated_q.data(), d);
 
         // Apply query factors
-        float final_dot =
-                query_fac.c1 * dot_qo + query_fac.c2 * sum_q - query_fac.c34;
+        float final_dot = query_fac.c1 * dot_qo - query_fac.c34;
 
         // pre_dist = ||or - c||^2 + ||qr - c||^2 -
         //     2 * ||or - c|| * ||qr - c|| * <q,o> - (IP ? ||or||^2 : 0)

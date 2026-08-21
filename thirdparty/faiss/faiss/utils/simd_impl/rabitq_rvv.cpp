@@ -137,6 +137,14 @@ uint64_t popcount<SIMDLevel::RISCV_RVV>(const uint8_t* data, size_t size) {
     return __riscv_vmv_x_s_u32m1_u32(red);
 }
 
+template <>
+float selected_float_sum<SIMDLevel::RISCV_RVV>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    return selected_float_sum<SIMDLevel::NONE>(sign_bits, values, d);
+}
+
 } // namespace faiss::rabitq
 
 namespace faiss::rabitq::multibit {

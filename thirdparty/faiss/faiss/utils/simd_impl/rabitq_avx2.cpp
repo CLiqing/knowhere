@@ -438,6 +438,33 @@ uint64_t popcount<SIMDLevel::AVX2>(const uint8_t* data, size_t size) {
 }
 
 template <>
+float selected_float_sum<SIMDLevel::AVX2>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    const __m256i bit_positions =
+            _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    __m256 sum = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256i packed = _mm256_set1_epi32(sign_bits[i / 8]);
+        const __m256i selected = _mm256_cmpeq_epi32(
+                _mm256_and_si256(packed, bit_positions), bit_positions);
+        const __m256 values_i = _mm256_loadu_ps(values + i);
+        sum = _mm256_add_ps(
+                sum,
+                _mm256_and_ps(values_i, _mm256_castsi256_ps(selected)));
+    }
+    alignas(32) float lanes[8];
+    _mm256_store_ps(lanes, sum);
+    float result = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
+            lanes[5] + lanes[6] + lanes[7];
+    result += selected_float_sum<SIMDLevel::NONE>(
+            sign_bits + i / 8, values + i, d - i);
+    return result;
+}
+
+template <>
 void rearrange_bit_planes<SIMDLevel::AVX2>(
         const uint8_t* rotated_qq,
         size_t d,
@@ -470,6 +497,20 @@ void rearrange_bit_planes<SIMDLevel::AVX2>(
 namespace faiss::rabitq::multibit {
 
 namespace {
+
+#if (defined(__GNUC__) || defined(__clang__)) && \
+        (defined(__x86_64__) || defined(__i386__))
+#define FAISS_RABITQ_HAS_BMI2_TARGET 1
+#define FAISS_RABITQ_TARGET_BMI2 __attribute__((target("bmi2")))
+
+inline bool cpu_supports_bmi2() {
+    static const bool supported = __builtin_cpu_supports("bmi2");
+    return supported;
+}
+#else
+#define FAISS_RABITQ_HAS_BMI2_TARGET 0
+#define FAISS_RABITQ_TARGET_BMI2
+#endif
 
 inline float hsum_avx2(__m256 v) {
     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -517,8 +558,8 @@ inline float ip_1exbit_avx2(
     return result;
 }
 
-#ifdef __BMI2__
-inline float ip_bitplane_avx2(
+#if FAISS_RABITQ_HAS_BMI2_TARGET
+FAISS_RABITQ_TARGET_BMI2 inline float ip_bitplane_avx2(
         const uint8_t* __restrict sign_bits,
         const uint8_t* __restrict ex_code,
         const float* __restrict rotated_q,
@@ -571,7 +612,7 @@ inline float ip_bitplane_avx2(
     result += ip_scalar(sign_bits, ex_code, rotated_q, i, d, ex_bits, cb);
     return result;
 }
-#endif // __BMI2__
+#endif
 
 } // namespace
 
@@ -587,13 +628,16 @@ float compute_inner_product<SIMDLevel::AVX2>(
         return ip_1exbit_avx2(sign_bits, ex_code, rotated_q, d, cb);
     }
 
-#ifdef __BMI2__
-    if (ex_bits <= 7) {
+#if FAISS_RABITQ_HAS_BMI2_TARGET
+    if (ex_bits <= 7 && cpu_supports_bmi2()) {
         return ip_bitplane_avx2(sign_bits, ex_code, rotated_q, d, ex_bits, cb);
     }
 #endif
     return ip_scalar(sign_bits, ex_code, rotated_q, 0, d, ex_bits, cb);
 }
+
+#undef FAISS_RABITQ_TARGET_BMI2
+#undef FAISS_RABITQ_HAS_BMI2_TARGET
 
 } // namespace faiss::rabitq::multibit
 

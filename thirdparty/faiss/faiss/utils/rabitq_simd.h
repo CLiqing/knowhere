@@ -79,6 +79,13 @@ uint64_t bitwise_xor_dot_product(
 template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
 uint64_t popcount(const uint8_t* data, size_t size);
 
+/** Sum float values selected by one packed sign bit per dimension. */
+template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
+float selected_float_sum(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d);
+
 /**
  * Rearrange per-dimension quantized query codes into bit-plane layout.
  *
@@ -221,6 +228,20 @@ inline uint64_t popcount<SIMDLevel::NONE>(const uint8_t* data, size_t size) {
     for (; offset < size; ++offset) {
         const auto yv = *(data + offset);
         sum += popcount32(yv);
+    }
+    return sum;
+}
+
+template <>
+inline float selected_float_sum<SIMDLevel::NONE>(
+        const uint8_t* sign_bits,
+        const float* values,
+        size_t d) {
+    float sum = 0.0f;
+    for (size_t i = 0; i < d; i++) {
+        if ((sign_bits[i / 8] >> (i % 8)) & 1) {
+            sum += values[i];
+        }
     }
     return sum;
 }
