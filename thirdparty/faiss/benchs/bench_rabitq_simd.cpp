@@ -126,8 +126,51 @@ void bench_rabitq_rearrange_avx2(benchmark::State& state) {
 }
 #endif
 
+template <SIMDLevel SL>
+void bench_rabitq_selected_float_sum(benchmark::State& state) {
+    const size_t d = state.range(0);
+    AlignedTable<uint8_t> sign_bits((d + 7) / 8);
+    AlignedTable<float> values(d);
+    byte_rand(sign_bits.data(), sign_bits.size(), 721);
+    float_rand(values.data(), values.size(), 812);
+
+    for (auto _ : state) {
+        float result =
+                rabitq::selected_float_sum<SL>(sign_bits.data(), values.data(), d);
+        benchmark::DoNotOptimize(result);
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
+template <SIMDLevel SL>
+void bench_rabitq_multibit_inner_product(benchmark::State& state) {
+    const size_t ex_bits = state.range(0);
+    const size_t d = state.range(1);
+    AlignedTable<uint8_t> sign_bits((d + 7) / 8);
+    // Padding keeps the benchmark input valid for kernels that load a complete
+    // machine word at the end of a bit-packed code.
+    AlignedTable<uint8_t> extra_code((d * ex_bits + 7) / 8 + 8);
+    AlignedTable<float> query(d);
+    byte_rand(sign_bits.data(), sign_bits.size(), 913);
+    byte_rand(extra_code.data(), extra_code.size(), 114);
+    float_rand(query.data(), query.size(), 315);
+
+    for (auto _ : state) {
+        float result = rabitq::multibit::compute_inner_product<SL>(
+                sign_bits.data(),
+                extra_code.data(),
+                query.data(),
+                d,
+                ex_bits,
+                -3.25f);
+        benchmark::DoNotOptimize(result);
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
 const std::vector<int64_t> qbs{1, 2, 4, 8};
 const std::vector<int64_t> dims{64, 100, 256, 512, 1000, 1024, 3072};
+const std::vector<int64_t> scorer_dims{128, 768, 1537};
 
 BENCHMARK(bench_rabitq_sum)->ArgsProduct({{0}, dims})->ArgNames({"qb", "d"});
 BENCHMARK(bench_rabitq_and_dot_product)
@@ -149,7 +192,27 @@ BENCHMARK(bench_rabitq_rearrange_scalar)
 BENCHMARK(bench_rabitq_rearrange_avx2)
         ->ArgsProduct({qbs, dims})
         ->ArgNames({"qb", "d"});
+
+BENCHMARK_TEMPLATE(bench_rabitq_selected_float_sum, SIMDLevel::NONE)
+        ->ArgsProduct({scorer_dims})
+        ->ArgNames({"d"});
+BENCHMARK_TEMPLATE(bench_rabitq_selected_float_sum, SIMDLevel::AVX2)
+        ->ArgsProduct({scorer_dims})
+        ->ArgNames({"d"});
+BENCHMARK_TEMPLATE(bench_rabitq_selected_float_sum, SIMDLevel::AVX512)
+        ->ArgsProduct({scorer_dims})
+        ->ArgNames({"d"});
+BENCHMARK_TEMPLATE(bench_rabitq_multibit_inner_product, SIMDLevel::NONE)
+        ->ArgsProduct({{1, 3, 7}, scorer_dims})
+        ->ArgNames({"extra_bits", "d"});
+BENCHMARK_TEMPLATE(bench_rabitq_multibit_inner_product, SIMDLevel::AVX2)
+        ->ArgsProduct({{1, 3, 7}, scorer_dims})
+        ->ArgNames({"extra_bits", "d"});
+BENCHMARK_TEMPLATE(bench_rabitq_multibit_inner_product, SIMDLevel::AVX512)
+        ->ArgsProduct({{1, 3, 7}, scorer_dims})
+        ->ArgNames({"extra_bits", "d"});
 #endif
-BENCHMARK_MAIN();
 
 } // namespace faiss
+
+BENCHMARK_MAIN();
