@@ -366,6 +366,71 @@ inline void quantize_query_values<SIMDLevel::NONE>(
  *********************************************************/
 namespace faiss::rabitq::multibit {
 
+inline float ip_byte_scalar(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t start,
+        size_t d,
+        float cb) {
+    float result = 0.0f;
+    for (size_t i = start; i < d; i++) {
+        result += query[i] * (static_cast<float>(code[i]) + cb);
+    }
+    return result;
+}
+
+template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
+float compute_inner_product_byte(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb);
+
+template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
+inline void compute_inner_product_byte_batch_4(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    for (size_t i = 0; i < 4; i++) {
+        out[i] = compute_inner_product_byte<SL>(codes[i], query, d, cb);
+    }
+}
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX2>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]);
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]);
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512_SPR>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]);
+
+template <>
+inline float compute_inner_product_byte<SIMDLevel::NONE>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    return ip_byte_scalar(code, query, 0, d, cb);
+}
+
 /// Scalar inner product for multi-bit RaBitQ.
 /// Extracts each code value in O(1) via 64-bit window read + shift + mask.
 /// Also serves as the tail handler for SIMD kernels via the @p start parameter.

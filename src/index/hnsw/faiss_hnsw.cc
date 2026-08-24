@@ -3148,8 +3148,9 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
                 std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlat>(dim, hnsw_cfg.M.value(), metric.value());
             hnsw_index->hnsw.efConstruction = hnsw_cfg.efConstruction.value();
 
-            auto rabitq_index = std::make_unique<faiss::IndexRaBitQ>(dim, metric.value(),
-                                                                     static_cast<uint8_t>(hnsw_cfg.rbq_bits.value()));
+            const auto rbq_bits = static_cast<uint8_t>(hnsw_cfg.rbq_bits.value());
+            auto rabitq_index = std::make_unique<faiss::IndexRaBitQ>(
+                dim, metric.value(), rbq_bits, rbq_bits == 8);
             // Search-time query quantization is request-local. Keep the shared
             // storage default deterministic and do not mutate it per request.
             rabitq_index->qb = 0;

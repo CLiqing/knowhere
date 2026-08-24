@@ -496,6 +496,66 @@ void rearrange_bit_planes<SIMDLevel::AVX2>(
 
 namespace faiss::rabitq::multibit {
 
+template <>
+float compute_inner_product_byte<SIMDLevel::AVX2>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    __m256 acc = _mm256_setzero_ps();
+    const __m256 bias = _mm256_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m128i bytes = _mm_loadl_epi64(
+                reinterpret_cast<const __m128i*>(code + i));
+        const __m256 values = _mm256_cvtepi32_ps(
+                _mm256_cvtepu8_epi32(bytes));
+        acc = _mm256_fmadd_ps(
+                _mm256_loadu_ps(query + i),
+                _mm256_add_ps(values, bias),
+                acc);
+    }
+    float lanes[8];
+    _mm256_storeu_ps(lanes, acc);
+    float result = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
+            lanes[5] + lanes[6] + lanes[7];
+    return result + ip_byte_scalar(code, query, i, d, cb);
+}
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX2>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    __m256 acc[4] = {
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps()};
+    const __m256 bias = _mm256_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256 q = _mm256_loadu_ps(query + i);
+        for (size_t j = 0; j < 4; j++) {
+            const __m128i bytes = _mm_loadl_epi64(
+                    reinterpret_cast<const __m128i*>(codes[j] + i));
+            const __m256 values = _mm256_cvtepi32_ps(
+                    _mm256_cvtepu8_epi32(bytes));
+            acc[j] = _mm256_fmadd_ps(
+                    q, _mm256_add_ps(values, bias), acc[j]);
+        }
+    }
+    for (size_t j = 0; j < 4; j++) {
+        float lanes[8];
+        _mm256_storeu_ps(lanes, acc[j]);
+        out[j] = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
+                lanes[5] + lanes[6] + lanes[7] +
+                ip_byte_scalar(codes[j], query, i, d, cb);
+    }
+}
+
 namespace {
 
 #if (defined(__GNUC__) || defined(__clang__)) && \

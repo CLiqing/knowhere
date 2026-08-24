@@ -642,6 +642,60 @@ void rearrange_bit_planes<SIMDLevel::AVX512>(
 
 namespace faiss::rabitq::multibit {
 
+template <>
+float compute_inner_product_byte<SIMDLevel::AVX512>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m128i bytes = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(code + i));
+        const __m512 values = _mm512_cvtepi32_ps(
+                _mm512_cvtepu8_epi32(bytes));
+        acc = _mm512_fmadd_ps(
+                _mm512_loadu_ps(query + i),
+                _mm512_add_ps(values, bias),
+                acc);
+    }
+    return _mm512_reduce_add_ps(acc) +
+            ip_byte_scalar(code, query, i, d, cb);
+}
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    __m512 acc[4] = {
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps()};
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 q = _mm512_loadu_ps(query + i);
+        for (size_t j = 0; j < 4; j++) {
+            const __m128i bytes = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(codes[j] + i));
+            const __m512 values = _mm512_cvtepi32_ps(
+                    _mm512_cvtepu8_epi32(bytes));
+            acc[j] = _mm512_fmadd_ps(
+                    q, _mm512_add_ps(values, bias), acc[j]);
+        }
+    }
+    for (size_t j = 0; j < 4; j++) {
+        out[j] = _mm512_reduce_add_ps(acc[j]) +
+                ip_byte_scalar(codes[j], query, i, d, cb);
+    }
+}
+
 namespace {
 
 #if (defined(__GNUC__) || defined(__clang__)) && \

@@ -33,12 +33,15 @@ using rabitq_utils::SignBitFactorsWithError;
 RaBitQuantizer::RaBitQuantizer(
         size_t d_in,
         MetricType metric,
-        size_t nb_bits_in)
+        size_t nb_bits_in,
+        bool byte_layout_in)
         : Quantizer(d_in, 0), // code_size will be set below
           metric_type{metric},
-          nb_bits{nb_bits_in} {
+          nb_bits{nb_bits_in},
+          byte_layout{byte_layout_in} {
     // Validate nb_bits range
     FAISS_THROW_IF_NOT(nb_bits >= 1 && nb_bits <= 9);
+    FAISS_THROW_IF_NOT(!byte_layout || nb_bits == 8);
 
     // Set code_size using compute_code_size
     code_size = compute_code_size(d, nb_bits);
@@ -49,6 +52,12 @@ size_t RaBitQuantizer::compute_code_size(size_t d_in, size_t num_bits) const {
     FAISS_THROW_IF_NOT(num_bits >= 1 && num_bits <= 9);
 
     size_t ex_bits = num_bits - 1;
+
+    if (byte_layout) {
+        FAISS_THROW_IF_NOT(num_bits == 8);
+        return d_in + sizeof(SignBitFactorsWithError) +
+                sizeof(ExtraBitsFactors);
+    }
 
     // Base: 1-bit codes + base factors
     // Layout for 1-bit: [binary_code: (d+7)/8 bytes][SignBitFactors: 8 bytes]
@@ -113,6 +122,7 @@ void RaBitQuantizer::compute_codes_core(
         // 12 bytes]
         //                [ex_code: (d*ex_bits+7)/8 bytes][ex_factors: 8 bytes]
         uint8_t* binary_code = code;
+        const size_t base_code_size = byte_layout ? d : (d + 7) / 8;
 
         // Step 1: Compute 1-bit quantization and base factors
         // Store residual for potential ex-bits quantization
@@ -134,7 +144,7 @@ void RaBitQuantizer::compute_codes_core(
             // For multi-bit: write full SignBitFactorsWithError (12 bytes)
             SignBitFactorsWithError* full_factors =
                     reinterpret_cast<SignBitFactorsWithError*>(
-                            code + (d + 7) / 8);
+                            code + base_code_size);
             *full_factors = factors_data;
         }
 
@@ -158,10 +168,18 @@ void RaBitQuantizer::compute_codes_core(
         if (ex_bits > 0) {
             // Pointer to ex-bit code section
             uint8_t* ex_code =
-                    code + (d + 7) / 8 + sizeof(SignBitFactorsWithError);
+                    code + base_code_size + sizeof(SignBitFactorsWithError);
+            std::vector<uint8_t> packed_ex_code;
+            if (byte_layout) {
+                packed_ex_code.resize((d * ex_bits + 7) / 8);
+                ex_code = packed_ex_code.data();
+            }
             // Pointer to ex-factors section
-            ExtraBitsFactors* ex_factors = reinterpret_cast<ExtraBitsFactors*>(
-                    ex_code + (d * ex_bits + 7) / 8);
+            ExtraBitsFactors byte_ex_factors;
+            ExtraBitsFactors* ex_factors = byte_layout
+                    ? &byte_ex_factors
+                    : reinterpret_cast<ExtraBitsFactors*>(
+                              ex_code + (d * ex_bits + 7) / 8);
 
             // Quantize residual to ex-bits (pass centroid for IP metric)
             rabitq_multibit::quantize_ex_bits(
@@ -172,6 +190,18 @@ void RaBitQuantizer::compute_codes_core(
                     *ex_factors,
                     metric_type,
                     centroid_in);
+
+            if (byte_layout) {
+                for (size_t j = 0; j < d; j++) {
+                    const uint8_t sign = residual[j] > 0.0f ? 0x80 : 0;
+                    binary_code[j] = sign | static_cast<uint8_t>(
+                            rabitq_utils::extract_code_inline(
+                                    ex_code, j, ex_bits));
+                }
+                memcpy(code + d + sizeof(SignBitFactorsWithError),
+                       ex_factors,
+                       sizeof(ExtraBitsFactors));
+            }
         }
     }
 }
@@ -204,10 +234,11 @@ void RaBitQuantizer::decode_core(
         // For 1-bit: use SignBitFactors (8 bytes)
         // For multi-bit: use SignBitFactorsWithError (12 bytes, but only first
         // 8 bytes used for decode)
+        const size_t base_code_size = byte_layout ? d : (d + 7) / 8;
         const SignBitFactors* fac = (ex_bits == 0)
                 ? reinterpret_cast<const SignBitFactors*>(code + (d + 7) / 8)
                 : reinterpret_cast<const SignBitFactorsWithError*>(
-                          code + (d + 7) / 8);
+                          code + base_code_size);
 
         // this is the baseline code
         //
@@ -215,7 +246,10 @@ void RaBitQuantizer::decode_core(
         for (size_t j = 0; j < d; j++) {
             // extract i-th bit
             const uint8_t masker = (1 << (j % 8));
-            const float bit = ((binary_data[j / 8] & masker) == masker) ? 1 : 0;
+            const float bit = byte_layout
+                    ? ((binary_data[j] & 0x80) != 0 ? 1.0f : 0.0f)
+                    : (((binary_data[j / 8] & masker) == masker) ? 1.0f
+                                                                  : 0.0f);
 
             // compute the output code
             x[i * d + j] = (bit - 0.5f) * fac->dp_multiplier * 2 * inv_d_sqrt +
@@ -234,13 +268,14 @@ void distance_to_code_full_batch_4_impl(
         const float* rotated_q,
         float qr_base,
         MetricType metric_type,
+        bool byte_layout,
         float out[4]) {
     const size_t ex_bits = nb_bits - 1;
     if (ex_bits == 0) {
         FAISS_THROW_MSG("multi-bit batch helper requires extra bits");
     }
 
-    const size_t code_size_base = (d + 7) / 8;
+    const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
     const size_t ex_offset =
             code_size_base + sizeof(SignBitFactorsWithError);
     const size_t ex_code_size = (d * ex_bits + 7) / 8;
@@ -249,21 +284,27 @@ void distance_to_code_full_batch_4_impl(
     const ExtraBitsFactors* ex_factors[4];
     for (size_t i = 0; i < 4; i++) {
         sign_bits[i] = codes[i];
-        ex_codes[i] = codes[i] + ex_offset;
+        ex_codes[i] = byte_layout ? codes[i] : codes[i] + ex_offset;
         ex_factors[i] = reinterpret_cast<const ExtraBitsFactors*>(
-                ex_codes[i] + ex_code_size);
+                byte_layout ? codes[i] + d + sizeof(SignBitFactorsWithError)
+                            : ex_codes[i] + ex_code_size);
     }
 
     const float cb = -(static_cast<float>(1 << ex_bits) - 0.5f);
     float inner_products[4];
-    rabitq::multibit::compute_inner_product_batch_4<SL>(
-            sign_bits,
-            ex_codes,
-            rotated_q,
-            d,
-            ex_bits,
-            cb,
-            inner_products);
+    if (byte_layout) {
+        rabitq::multibit::compute_inner_product_byte_batch_4<SL>(
+                ex_codes, rotated_q, d, cb, inner_products);
+    } else {
+        rabitq::multibit::compute_inner_product_batch_4<SL>(
+                sign_bits,
+                ex_codes,
+                rotated_q,
+                d,
+                ex_bits,
+                cb,
+                inner_products);
+    }
 
     for (size_t i = 0; i < 4; i++) {
         float distance = qr_base + ex_factors[i]->f_add_ex +
@@ -285,6 +326,7 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
     std::vector<float> rotated_q;
     // some additional numbers for the query
     QueryFactorsData query_fac;
+    bool byte_layout = false;
 
     RaBitQDistanceComputerNotQ() = default;
 
@@ -323,13 +365,29 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
                  metric_type == MetricType::METRIC_INNER_PRODUCT));
         FAISS_ASSERT(rotated_q.size() == d);
 
-        const size_t code_size_base = (d + 7) / 8;
+        const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
         const size_t ex_bits = nb_bits - 1;
         const SignBitFactors* base_fac = (ex_bits == 0)
                 ? reinterpret_cast<const SignBitFactors*>(code + code_size_base)
                 : reinterpret_cast<const SignBitFactorsWithError*>(
                           code + code_size_base);
-        return distance_to_code_1bit_impl(code, base_fac);
+        if (!byte_layout) {
+            return distance_to_code_1bit_impl(code, base_fac);
+        }
+
+        float dot_qo = 0.0f;
+        for (size_t i = 0; i < d; i++) {
+            if ((code[i] & 0x80) != 0) {
+                dot_qo += rotated_q[i];
+            }
+        }
+        const float final_dot = query_fac.c1 * dot_qo - query_fac.c34;
+        const float pre_dist = base_fac->or_minus_c_l2sqr +
+                query_fac.qr_to_c_L2sqr -
+                2 * base_fac->dp_multiplier * final_dot;
+        return metric_type == MetricType::METRIC_L2
+                ? std::max(0.0f, pre_dist)
+                : -0.5f * (pre_dist - query_fac.qr_norm_L2sqr);
     }
 
     // Compute full distance using 1-bit + ex-bits (accurate)
@@ -349,15 +407,30 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
 
         // Extract pointers to code sections
         const uint8_t* binary_data = code;
-        size_t offset = (d + 7) / 8 + sizeof(SignBitFactorsWithError);
-        const uint8_t* ex_code = code + offset;
+        size_t offset = (byte_layout ? d : (d + 7) / 8) +
+                sizeof(SignBitFactorsWithError);
+        const uint8_t* ex_code = byte_layout ? code : code + offset;
         const ExtraBitsFactors* ex_fac =
                 reinterpret_cast<const ExtraBitsFactors*>(
-                        ex_code + (d * ex_bits + 7) / 8);
+                        byte_layout
+                                ? code + d + sizeof(SignBitFactorsWithError)
+                                : ex_code + (d * ex_bits + 7) / 8);
 
         float qr_base = (metric_type == MetricType::METRIC_INNER_PRODUCT)
                 ? query_fac.q_dot_c
                 : query_fac.qr_to_c_L2sqr;
+        if (byte_layout) {
+            const float cb =
+                    -(static_cast<float>(1 << ex_bits) - 0.5f);
+            const float ex_ip =
+                    rabitq::multibit::compute_inner_product_byte<SL>(
+                            ex_code, rotated_q.data(), d, cb);
+            const float distance = qr_base + ex_fac->f_add_ex +
+                    ex_fac->f_rescale_ex * ex_ip;
+            return metric_type == MetricType::METRIC_L2
+                    ? std::max(0.0f, distance)
+                    : distance;
+        }
         return rabitq_utils::compute_full_multibit_distance<SL>(
                 binary_data,
                 ex_code,
@@ -397,6 +470,7 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
                 rotated_q.data(),
                 qr_base,
                 metric_type,
+                byte_layout,
                 distances);
         dis0 = distances[0];
         dis1 = distances[1];
@@ -456,7 +530,7 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
             const IDSelector* sel,
             bool keep_max,
             ResultHandler& handler) final {
-        const size_t code_size_base = (d + 7) / 8;
+        const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
         const size_t ex_bits = nb_bits - 1;
         FAISS_ASSERT(ex_bits > 0);
 
@@ -474,7 +548,7 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
                     reinterpret_cast<const SignBitFactorsWithError*>(
                             codes + code_size_base);
             const float est_distance =
-                    distance_to_code_1bit_impl(codes, base_fac);
+                    distance_to_code_1bit(codes);
 
             const bool should_refine = rabitq_utils::should_refine_candidate(
                     est_distance,
@@ -645,6 +719,7 @@ struct RaBitQDistanceComputerQ final : RaBitQDistanceComputer {
                 rotated_q.data(),
                 qr_base,
                 metric_type,
+                false,
                 distances);
         dis0 = distances[0];
         dis1 = distances[1];
@@ -772,9 +847,13 @@ FlatCodesDistanceComputer* RaBitQuantizer::get_distance_computer(
                     dc->d = d;
                     dc->centroid = centroid_in;
                     dc->nb_bits = nb_bits;
+                    dc->byte_layout = byte_layout;
 
                     return dc.release();
                 } else {
+                    FAISS_THROW_IF_NOT_MSG(
+                            !byte_layout,
+                            "8-bit byte-layout RaBitQ currently requires qb=0");
                     auto dc = std::make_unique<RaBitQDistanceComputerQ<SL>>();
                     dc->metric_type = metric_type;
                     dc->d = d;

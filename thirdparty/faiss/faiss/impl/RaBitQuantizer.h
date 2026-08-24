@@ -47,10 +47,16 @@ struct RaBitQuantizer : Quantizer {
     // - nb_bits = 2-9: multi-bit RaBitQ (1 sign bit + ex_bits extra bits)
     size_t nb_bits = 1;
 
+    // Store an 8-bit code as one byte per dimension. This is equivalent to
+    // the packed sign + 7 extra-bit representation, but avoids unpacking on
+    // every distance computation. Currently enabled only by HNSW_RABITQ.
+    bool byte_layout = false;
+
     RaBitQuantizer(
             size_t d = 0,
             MetricType metric = MetricType::METRIC_L2,
-            size_t nb_bits = 1);
+            size_t nb_bits = 1,
+            bool byte_layout = false);
 
     // Compute code size based on dimensionality and number of bits
     // Returns: size in bytes for one encoded vector

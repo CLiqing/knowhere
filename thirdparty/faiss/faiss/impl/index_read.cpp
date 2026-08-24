@@ -2851,12 +2851,21 @@ std::unique_ptr<Index> read_index_up(IOReader* f, int io_flags) {
         // rabitq.nb_bits is already set to 1 by read_RaBitQuantizer
         idxq->code_size = idxq->rabitq.code_size;
         idx = std::move(idxq);
-    } else if (h == fourcc("Ixrr")) {
-        // Ixrr = multi-bit format (new)
+    } else if (h == fourcc("Ixrr") || h == fourcc("Ixrb")) {
+        // Ixrr = packed multi-bit; Ixrb = 8-bit byte-per-dimension
         auto idxq = std::make_unique<IndexRaBitQ>();
         read_index_header(*idxq, f);
         read_RaBitQuantizer(
                 idxq->rabitq, f, idxq->d, true); // Reads nb_bits from file
+        idxq->rabitq.byte_layout = h == fourcc("Ixrb");
+        FAISS_THROW_IF_NOT_MSG(
+                !idxq->rabitq.byte_layout || idxq->rabitq.nb_bits == 8,
+                "RaBitQ byte layout requires nb_bits=8");
+        FAISS_THROW_IF_NOT_MSG(
+                idxq->rabitq.code_size == idxq->rabitq.compute_code_size(
+                                                     idxq->d,
+                                                     idxq->rabitq.nb_bits),
+                "RaBitQ byte-layout code size mismatch");
         READVECTOR(idxq->codes);
         READVECTOR(idxq->center);
         READ1(idxq->qb);

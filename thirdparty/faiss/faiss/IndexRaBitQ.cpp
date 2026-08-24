@@ -21,8 +21,13 @@ using rabitq_utils::SignBitFactorsWithError;
 
 IndexRaBitQ::IndexRaBitQ() = default;
 
-IndexRaBitQ::IndexRaBitQ(idx_t d_in, MetricType metric, uint8_t nb_bits_in)
-        : IndexFlatCodes(0, d_in, metric), rabitq(d_in, metric, nb_bits_in) {
+IndexRaBitQ::IndexRaBitQ(
+        idx_t d_in,
+        MetricType metric,
+        uint8_t nb_bits_in,
+        bool byte_layout)
+        : IndexFlatCodes(0, d_in, metric),
+          rabitq(d_in, metric, nb_bits_in, byte_layout) {
     // Update code size based on nb_bits
     code_size = rabitq.code_size;
 

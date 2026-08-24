@@ -1018,7 +1018,15 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
     } else if (
             const IndexRaBitQ* idxq = dynamic_cast<const IndexRaBitQ*>(idx)) {
         // Use different fourcc codes for 1-bit vs multi-bit
-        if (idxq->rabitq.nb_bits == 1) {
+        if (idxq->rabitq.byte_layout) {
+            FAISS_THROW_IF_NOT_MSG(
+                    idxq->rabitq.nb_bits == 8,
+                    "RaBitQ byte layout requires nb_bits=8");
+            uint32_t h = fourcc("Ixrb"); // 8-bit byte-per-dimension
+            WRITE1(h);
+            write_index_header(idx, f);
+            write_RaBitQuantizer(&idxq->rabitq, f, true);
+        } else if (idxq->rabitq.nb_bits == 1) {
             uint32_t h = fourcc("Ixrq"); // 1-bit (backward compatible)
             WRITE1(h);
             write_index_header(idx, f);

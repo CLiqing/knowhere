@@ -516,6 +516,9 @@ static void validate_RaBitQ_index_for_write(const ::faiss::IndexRaBitQ* idxq) {
     FAISS_THROW_IF_NOT_MSG(
             idxq->rabitq.nb_bits >= 1 && idxq->rabitq.nb_bits <= 9,
             "IndexRaBitQ nb_bits must be in [1, 9]");
+    FAISS_THROW_IF_NOT_MSG(
+            !idxq->rabitq.byte_layout || idxq->rabitq.nb_bits == 8,
+            "IndexRaBitQ byte layout requires nb_bits=8");
     const size_t expected_code_size =
             idxq->rabitq.compute_code_size(idxq->d, idxq->rabitq.nb_bits);
     FAISS_THROW_IF_NOT_MSG(
@@ -749,7 +752,9 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
                     dynamic_cast<const ::faiss::IndexRaBitQ*>(idx)) {
         validate_RaBitQ_index_for_write(idxq);
         const bool multi_bit = idxq->rabitq.nb_bits > 1;
-        uint32_t h = multi_bit ? fourcc("Ixrr") : fourcc("Ixrq");
+        uint32_t h = idxq->rabitq.byte_layout
+                ? fourcc("Ixrb")
+                : (multi_bit ? fourcc("Ixrr") : fourcc("Ixrq"));
         WRITE1(h);
         write_index_header(idxq, f);
         write_RaBitQuantizer(&idxq->rabitq, f, multi_bit);
