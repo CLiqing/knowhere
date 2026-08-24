@@ -756,6 +756,90 @@ FAISS_RABITQ_TARGET_BMI2 inline float ip_bitplane_avx2(
     result += ip_scalar(sign_bits, ex_code, rotated_q, i, d, ex_bits, cb);
     return result;
 }
+
+// The 16-lane AVX-512 bit extraction below needs more than one 64-bit PEXT
+// window once ex_bits exceeds four. Keep a genuine four-code path for those
+// wider codes by sharing each query load across four 8-lane reconstructions.
+FAISS_RABITQ_TARGET_BMI2 inline void ip_bitplane_batch_4_avx2(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    const __m256 v_one = _mm256_set1_ps(1.0f);
+    const __m256i bit_pos =
+            _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256 v_cb = _mm256_set1_ps(cb);
+
+    uint64_t pext_masks[7];
+    __m256 v_weights[8];
+    for (size_t b = 0; b < ex_bits; b++) {
+        uint64_t mask = 0;
+        for (int j = 0; j < 8; j++) {
+            mask |= (1ULL << (b + j * ex_bits));
+        }
+        pext_masks[b] = mask;
+        v_weights[b] = _mm256_set1_ps(static_cast<float>(1u << b));
+    }
+    v_weights[ex_bits] =
+            _mm256_set1_ps(static_cast<float>(1u << ex_bits));
+
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256 query = _mm256_loadu_ps(rotated_q + i);
+
+        auto reconstruct = [&](size_t code_index) FAISS_RABITQ_TARGET_BMI2 {
+            const __m256i sign_cmp = _mm256_cmpgt_epi32(
+                    _mm256_and_si256(
+                            _mm256_set1_epi32(sign_bits[code_index][i / 8]),
+                            bit_pos),
+                    zero);
+            __m256 reconstruction = _mm256_mul_ps(
+                    _mm256_and_ps(_mm256_castsi256_ps(sign_cmp), v_one),
+                    v_weights[ex_bits]);
+
+            uint64_t extra_bits = 0;
+            memcpy(
+                    &extra_bits,
+                    ex_codes[code_index] + (i / 8) * ex_bits,
+                    sizeof(extra_bits));
+            for (size_t b = 0; b < ex_bits; b++) {
+                const auto plane = static_cast<uint8_t>(
+                        _pext_u64(extra_bits, pext_masks[b]));
+                const __m256i plane_cmp = _mm256_cmpgt_epi32(
+                        _mm256_and_si256(
+                                _mm256_set1_epi32(plane), bit_pos),
+                        zero);
+                const __m256 plane_values = _mm256_and_ps(
+                        _mm256_castsi256_ps(plane_cmp), v_one);
+                reconstruction = _mm256_fmadd_ps(
+                        plane_values, v_weights[b], reconstruction);
+            }
+            return _mm256_add_ps(reconstruction, v_cb);
+        };
+
+        acc0 = _mm256_fmadd_ps(query, reconstruct(0), acc0);
+        acc1 = _mm256_fmadd_ps(query, reconstruct(1), acc1);
+        acc2 = _mm256_fmadd_ps(query, reconstruct(2), acc2);
+        acc3 = _mm256_fmadd_ps(query, reconstruct(3), acc3);
+    }
+
+    out[0] = hsum_avx2(acc0) +
+            ip_scalar(sign_bits[0], ex_codes[0], rotated_q, i, d, ex_bits, cb);
+    out[1] = hsum_avx2(acc1) +
+            ip_scalar(sign_bits[1], ex_codes[1], rotated_q, i, d, ex_bits, cb);
+    out[2] = hsum_avx2(acc2) +
+            ip_scalar(sign_bits[2], ex_codes[2], rotated_q, i, d, ex_bits, cb);
+    out[3] = hsum_avx2(acc3) +
+            ip_scalar(sign_bits[3], ex_codes[3], rotated_q, i, d, ex_bits, cb);
+}
 #endif
 
 #if FAISS_RABITQ_HAS_BMI2_TARGET
@@ -928,6 +1012,11 @@ void compute_inner_product_batch_4<SIMDLevel::AVX512>(
 #if FAISS_RABITQ_HAS_BMI2_TARGET
     if (ex_bits <= 4 && cpu_supports_bmi2()) {
         ip_bitplane_batch_4_avx512(
+                sign_bits, ex_codes, rotated_q, d, ex_bits, cb, out);
+        return;
+    }
+    if (ex_bits <= 7 && cpu_supports_bmi2()) {
+        ip_bitplane_batch_4_avx2(
                 sign_bits, ex_codes, rotated_q, d, ex_bits, cb, out);
         return;
     }
