@@ -8,7 +8,6 @@
 #include <faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h>
 
 #include <memory>
-#include <vector>
 
 #include <faiss/VectorTransform.h>
 #include <faiss/impl/FaissAssert.h>
@@ -17,42 +16,28 @@ namespace faiss::cppcontrib::knowhere {
 
 namespace {
 
-void apply_rotation_single_query(
-        const faiss::RandomRotationMatrix* rotation,
-        const float* x,
-        float* xt) {
-    const int d = rotation->d_in;
-    const float* a = rotation->A.data();
-    for (int j = 0; j < d; ++j) {
-        const float* col = a + j * d;
-        float acc = rotation->have_bias ? rotation->b[j] : 0.0f;
-#pragma omp simd reduction(+ : acc)
-        for (int k = 0; k < d; ++k) {
-            acc += col[k] * x[k];
-        }
-        xt[j] = acc;
-    }
-}
-
 struct RaBitQPreTransformDistanceComputer : DistanceComputer {
-    const faiss::RandomRotationMatrix* rotation;
+    const faiss::IndexPreTransform* index;
     std::unique_ptr<DistanceComputer> sub_dc;
-    std::vector<float> transformed_query;
+    std::unique_ptr<const float[]> transformed_query;
 
     RaBitQPreTransformDistanceComputer(
             const faiss::IndexPreTransform* index_in,
             const faiss::IndexRaBitQ* rabitq,
             uint8_t qb,
             bool centered)
-            : rotation(dynamic_cast<const faiss::RandomRotationMatrix*>(
-                      index_in->chain[0])),
+            : index(index_in),
               sub_dc(rabitq->get_quantized_distance_computer(qb, centered)) {}
 
     void set_query(const float* x) override {
-        FAISS_ASSERT(rotation != nullptr);
-        transformed_query.resize(rotation->d_out);
-        apply_rotation_single_query(rotation, x, transformed_query.data());
-        sub_dc->set_query(transformed_query.data());
+        const float* xt = index->apply_chain(1, x);
+        if (xt == x) {
+            transformed_query.reset();
+            sub_dc->set_query(x);
+        } else {
+            transformed_query.reset(xt);
+            sub_dc->set_query(xt);
+        }
     }
 
     float symmetric_dis(idx_t i, idx_t j) override {
