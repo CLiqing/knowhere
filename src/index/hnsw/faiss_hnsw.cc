@@ -3150,7 +3150,7 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
 
             const auto rbq_bits = static_cast<uint8_t>(hnsw_cfg.rbq_bits.value());
             auto rabitq_index = std::make_unique<faiss::IndexRaBitQ>(
-                dim, metric.value(), rbq_bits, rbq_bits == 8);
+                dim, metric.value(), rbq_bits, rbq_bits > 1);
             // Search-time query quantization is request-local. Keep the shared
             // storage default deterministic and do not mutate it per request.
             rabitq_index->qb = 0;

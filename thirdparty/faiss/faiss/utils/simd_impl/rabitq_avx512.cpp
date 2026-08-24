@@ -642,6 +642,149 @@ void rearrange_bit_planes<SIMDLevel::AVX512>(
 
 namespace faiss::rabitq::multibit {
 
+namespace {
+
+template <size_t NBITS>
+inline __m256i dense_decode_8_i32_avx512(const uint8_t* code) {
+    static_assert(NBITS >= 2 && NBITS <= 8);
+    uint64_t packed = 0;
+    memcpy(&packed, code, NBITS);
+    constexpr uint64_t mask = (uint64_t{1} << NBITS) - 1;
+    return _mm256_setr_epi32(
+            (packed >> (0 * NBITS)) & mask,
+            (packed >> (1 * NBITS)) & mask,
+            (packed >> (2 * NBITS)) & mask,
+            (packed >> (3 * NBITS)) & mask,
+            (packed >> (4 * NBITS)) & mask,
+            (packed >> (5 * NBITS)) & mask,
+            (packed >> (6 * NBITS)) & mask,
+            (packed >> (7 * NBITS)) & mask);
+}
+
+template <size_t NBITS>
+inline __m512 dense_decode_16_avx512(const uint8_t* code) {
+    const __m256i lo = dense_decode_8_i32_avx512<NBITS>(code);
+    const __m256i hi = dense_decode_8_i32_avx512<NBITS>(code + NBITS);
+    const __m512i values = _mm512_inserti32x8(
+            _mm512_castsi256_si512(lo), hi, 1);
+    return _mm512_cvtepi32_ps(values);
+}
+
+template <size_t NBITS>
+float ip_dense_avx512(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 values = dense_decode_16_avx512<NBITS>(
+                code + (i * NBITS) / 8);
+        acc = _mm512_fmadd_ps(
+                _mm512_loadu_ps(query + i),
+                _mm512_add_ps(values, bias),
+                acc);
+    }
+    return _mm512_reduce_add_ps(acc) +
+            compute_inner_product_dense<SIMDLevel::NONE>(
+                   code + (i * NBITS) / 8,
+                   query + i,
+                   d - i,
+                   NBITS,
+                   cb);
+}
+
+template <size_t NBITS>
+void ip_dense_batch_4_avx512(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    __m512 acc[4] = {
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps()};
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 q = _mm512_loadu_ps(query + i);
+        for (size_t j = 0; j < 4; j++) {
+            const __m512 values = dense_decode_16_avx512<NBITS>(
+                    codes[j] + (i * NBITS) / 8);
+            acc[j] = _mm512_fmadd_ps(
+                    q, _mm512_add_ps(values, bias), acc[j]);
+        }
+    }
+    for (size_t j = 0; j < 4; j++) {
+        out[j] = _mm512_reduce_add_ps(acc[j]) +
+                compute_inner_product_dense<SIMDLevel::NONE>(
+                        codes[j] + (i * NBITS) / 8,
+                        query + i,
+                        d - i,
+                        NBITS,
+                        cb);
+    }
+}
+
+} // namespace
+
+template <>
+float compute_inner_product_dense<SIMDLevel::AVX512>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        size_t nbits,
+        float cb) {
+#define FAISS_RABITQ_DENSE_CASE(N) \
+    case N:                           \
+        return ip_dense_avx512<N>(code, query, d, cb)
+    switch (nbits) {
+        FAISS_RABITQ_DENSE_CASE(2);
+        FAISS_RABITQ_DENSE_CASE(3);
+        FAISS_RABITQ_DENSE_CASE(4);
+        FAISS_RABITQ_DENSE_CASE(5);
+        FAISS_RABITQ_DENSE_CASE(6);
+        FAISS_RABITQ_DENSE_CASE(7);
+        FAISS_RABITQ_DENSE_CASE(8);
+        default:
+            return compute_inner_product_dense<SIMDLevel::NONE>(
+                    code, query, d, nbits, cb);
+    }
+#undef FAISS_RABITQ_DENSE_CASE
+}
+
+template <>
+void compute_inner_product_dense_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb,
+        float out[4]) {
+#define FAISS_RABITQ_DENSE_CASE(N) \
+    case N:                           \
+        return ip_dense_batch_4_avx512<N>(codes, query, d, cb, out)
+    switch (nbits) {
+        FAISS_RABITQ_DENSE_CASE(2);
+        FAISS_RABITQ_DENSE_CASE(3);
+        FAISS_RABITQ_DENSE_CASE(4);
+        FAISS_RABITQ_DENSE_CASE(5);
+        FAISS_RABITQ_DENSE_CASE(6);
+        FAISS_RABITQ_DENSE_CASE(7);
+        FAISS_RABITQ_DENSE_CASE(8);
+        default:
+            for (size_t i = 0; i < 4; i++) {
+                out[i] = compute_inner_product_dense<SIMDLevel::NONE>(
+                        codes[i], query, d, nbits, cb);
+            }
+    }
+#undef FAISS_RABITQ_DENSE_CASE
+}
+
 template <>
 float compute_inner_product_byte<SIMDLevel::AVX512>(
         const uint8_t* __restrict code,

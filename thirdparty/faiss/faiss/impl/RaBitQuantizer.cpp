@@ -41,7 +41,7 @@ RaBitQuantizer::RaBitQuantizer(
           byte_layout{byte_layout_in} {
     // Validate nb_bits range
     FAISS_THROW_IF_NOT(nb_bits >= 1 && nb_bits <= 9);
-    FAISS_THROW_IF_NOT(!byte_layout || nb_bits == 8);
+    FAISS_THROW_IF_NOT(!byte_layout || nb_bits > 1);
 
     // Set code_size using compute_code_size
     code_size = compute_code_size(d, nb_bits);
@@ -54,8 +54,9 @@ size_t RaBitQuantizer::compute_code_size(size_t d_in, size_t num_bits) const {
     size_t ex_bits = num_bits - 1;
 
     if (byte_layout) {
-        FAISS_THROW_IF_NOT(num_bits == 8);
-        return d_in + sizeof(SignBitFactorsWithError) +
+        FAISS_THROW_IF_NOT(num_bits > 1);
+        return (d_in * num_bits + 7) / 8 +
+                sizeof(SignBitFactorsWithError) +
                 sizeof(ExtraBitsFactors);
     }
 
@@ -122,7 +123,9 @@ void RaBitQuantizer::compute_codes_core(
         // 12 bytes]
         //                [ex_code: (d*ex_bits+7)/8 bytes][ex_factors: 8 bytes]
         uint8_t* binary_code = code;
-        const size_t base_code_size = byte_layout ? d : (d + 7) / 8;
+        const size_t base_code_size = byte_layout
+                ? (d * nb_bits + 7) / 8
+                : (d + 7) / 8;
 
         // Step 1: Compute 1-bit quantization and base factors
         // Store residual for potential ex-bits quantization
@@ -159,7 +162,7 @@ void RaBitQuantizer::compute_codes_core(
             const bool xb = (or_minus_c > 0.0f);
 
             // Store the 1-bit sign code
-            if (xb) {
+            if (xb && !byte_layout) {
                 rabitq_utils::set_bit_standard(binary_code, j);
             }
         }
@@ -193,12 +196,25 @@ void RaBitQuantizer::compute_codes_core(
 
             if (byte_layout) {
                 for (size_t j = 0; j < d; j++) {
-                    const uint8_t sign = residual[j] > 0.0f ? 0x80 : 0;
-                    binary_code[j] = sign | static_cast<uint8_t>(
+                    const uint16_t sign = residual[j] > 0.0f
+                            ? static_cast<uint16_t>(1u << ex_bits)
+                            : 0;
+                    const uint16_t value = sign | static_cast<uint16_t>(
                             rabitq_utils::extract_code_inline(
                                     ex_code, j, ex_bits));
+                    const size_t bit_pos = j * nb_bits;
+                    const size_t byte_pos = bit_pos / 8;
+                    const size_t shift = bit_pos % 8;
+                    const uint32_t shifted =
+                            static_cast<uint32_t>(value) << shift;
+                    const size_t nbytes = (shift + nb_bits + 7) / 8;
+                    for (size_t b = 0; b < nbytes; b++) {
+                        binary_code[byte_pos + b] |=
+                                static_cast<uint8_t>(shifted >> (8 * b));
+                    }
                 }
-                memcpy(code + d + sizeof(SignBitFactorsWithError),
+                memcpy(code + base_code_size +
+                               sizeof(SignBitFactorsWithError),
                        ex_factors,
                        sizeof(ExtraBitsFactors));
             }
@@ -234,7 +250,9 @@ void RaBitQuantizer::decode_core(
         // For 1-bit: use SignBitFactors (8 bytes)
         // For multi-bit: use SignBitFactorsWithError (12 bytes, but only first
         // 8 bytes used for decode)
-        const size_t base_code_size = byte_layout ? d : (d + 7) / 8;
+        const size_t base_code_size = byte_layout
+                ? (d * nb_bits + 7) / 8
+                : (d + 7) / 8;
         const SignBitFactors* fac = (ex_bits == 0)
                 ? reinterpret_cast<const SignBitFactors*>(code + (d + 7) / 8)
                 : reinterpret_cast<const SignBitFactorsWithError*>(
@@ -247,7 +265,11 @@ void RaBitQuantizer::decode_core(
             // extract i-th bit
             const uint8_t masker = (1 << (j % 8));
             const float bit = byte_layout
-                    ? ((binary_data[j] & 0x80) != 0 ? 1.0f : 0.0f)
+                    ? ((rabitq_utils::extract_code_inline(
+                                binary_data, j, nb_bits) &
+                        (1u << ex_bits)) != 0
+                               ? 1.0f
+                               : 0.0f)
                     : (((binary_data[j / 8] & masker) == masker) ? 1.0f
                                                                   : 0.0f);
 
@@ -275,7 +297,9 @@ void distance_to_code_full_batch_4_impl(
         FAISS_THROW_MSG("multi-bit batch helper requires extra bits");
     }
 
-    const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
+    const size_t code_size_base = byte_layout
+            ? (d * nb_bits + 7) / 8
+            : (d + 7) / 8;
     const size_t ex_offset =
             code_size_base + sizeof(SignBitFactorsWithError);
     const size_t ex_code_size = (d * ex_bits + 7) / 8;
@@ -286,15 +310,17 @@ void distance_to_code_full_batch_4_impl(
         sign_bits[i] = codes[i];
         ex_codes[i] = byte_layout ? codes[i] : codes[i] + ex_offset;
         ex_factors[i] = reinterpret_cast<const ExtraBitsFactors*>(
-                byte_layout ? codes[i] + d + sizeof(SignBitFactorsWithError)
+                byte_layout
+                        ? codes[i] + code_size_base +
+                                sizeof(SignBitFactorsWithError)
                             : ex_codes[i] + ex_code_size);
     }
 
     const float cb = -(static_cast<float>(1 << ex_bits) - 0.5f);
     float inner_products[4];
     if (byte_layout) {
-        rabitq::multibit::compute_inner_product_byte_batch_4<SL>(
-                ex_codes, rotated_q, d, cb, inner_products);
+        rabitq::multibit::compute_inner_product_dense_batch_4<SL>(
+                ex_codes, rotated_q, d, nb_bits, cb, inner_products);
     } else {
         rabitq::multibit::compute_inner_product_batch_4<SL>(
                 sign_bits,
@@ -365,7 +391,9 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
                  metric_type == MetricType::METRIC_INNER_PRODUCT));
         FAISS_ASSERT(rotated_q.size() == d);
 
-        const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
+        const size_t code_size_base = byte_layout
+                ? (d * nb_bits + 7) / 8
+                : (d + 7) / 8;
         const size_t ex_bits = nb_bits - 1;
         const SignBitFactors* base_fac = (ex_bits == 0)
                 ? reinterpret_cast<const SignBitFactors*>(code + code_size_base)
@@ -377,7 +405,9 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
 
         float dot_qo = 0.0f;
         for (size_t i = 0; i < d; i++) {
-            if ((code[i] & 0x80) != 0) {
+            if ((rabitq_utils::extract_code_inline(
+                         code, i, nb_bits) &
+                 (1u << (nb_bits - 1))) != 0) {
                 dot_qo += rotated_q[i];
             }
         }
@@ -407,13 +437,15 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
 
         // Extract pointers to code sections
         const uint8_t* binary_data = code;
-        size_t offset = (byte_layout ? d : (d + 7) / 8) +
+        const size_t dense_code_size = (d * nb_bits + 7) / 8;
+        size_t offset = (byte_layout ? dense_code_size : (d + 7) / 8) +
                 sizeof(SignBitFactorsWithError);
         const uint8_t* ex_code = byte_layout ? code : code + offset;
         const ExtraBitsFactors* ex_fac =
                 reinterpret_cast<const ExtraBitsFactors*>(
                         byte_layout
-                                ? code + d + sizeof(SignBitFactorsWithError)
+                                ? code + dense_code_size +
+                                        sizeof(SignBitFactorsWithError)
                                 : ex_code + (d * ex_bits + 7) / 8);
 
         float qr_base = (metric_type == MetricType::METRIC_INNER_PRODUCT)
@@ -423,8 +455,8 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
             const float cb =
                     -(static_cast<float>(1 << ex_bits) - 0.5f);
             const float ex_ip =
-                    rabitq::multibit::compute_inner_product_byte<SL>(
-                            ex_code, rotated_q.data(), d, cb);
+                    rabitq::multibit::compute_inner_product_dense<SL>(
+                            ex_code, rotated_q.data(), d, nb_bits, cb);
             const float distance = qr_base + ex_fac->f_add_ex +
                     ex_fac->f_rescale_ex * ex_ip;
             return metric_type == MetricType::METRIC_L2
@@ -530,7 +562,9 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
             const IDSelector* sel,
             bool keep_max,
             ResultHandler& handler) final {
-        const size_t code_size_base = byte_layout ? d : (d + 7) / 8;
+        const size_t code_size_base = byte_layout
+                ? (d * nb_bits + 7) / 8
+                : (d + 7) / 8;
         const size_t ex_bits = nb_bits - 1;
         FAISS_ASSERT(ex_bits > 0);
 
@@ -853,7 +887,7 @@ FlatCodesDistanceComputer* RaBitQuantizer::get_distance_computer(
                 } else {
                     FAISS_THROW_IF_NOT_MSG(
                             !byte_layout,
-                            "8-bit byte-layout RaBitQ currently requires qb=0");
+                            "dense-layout RaBitQ currently requires qb=0");
                     auto dc = std::make_unique<RaBitQDistanceComputerQ<SL>>();
                     dc->metric_type = metric_type;
                     dc->d = d;

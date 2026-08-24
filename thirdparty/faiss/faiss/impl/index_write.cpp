@@ -1020,9 +1020,9 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
         // Use different fourcc codes for 1-bit vs multi-bit
         if (idxq->rabitq.byte_layout) {
             FAISS_THROW_IF_NOT_MSG(
-                    idxq->rabitq.nb_bits == 8,
-                    "RaBitQ byte layout requires nb_bits=8");
-            uint32_t h = fourcc("Ixrb"); // 8-bit byte-per-dimension
+                    idxq->rabitq.nb_bits > 1,
+                    "RaBitQ dense layout requires nb_bits>1");
+            uint32_t h = fourcc("Ixrd"); // dense packed multi-bit
             WRITE1(h);
             write_index_header(idx, f);
             write_RaBitQuantizer(&idxq->rabitq, f, true);

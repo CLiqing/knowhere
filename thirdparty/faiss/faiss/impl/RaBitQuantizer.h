@@ -47,9 +47,10 @@ struct RaBitQuantizer : Quantizer {
     // - nb_bits = 2-9: multi-bit RaBitQ (1 sign bit + ex_bits extra bits)
     size_t nb_bits = 1;
 
-    // Store an 8-bit code as one byte per dimension. This is equivalent to
-    // the packed sign + 7 extra-bit representation, but avoids unpacking on
-    // every distance computation. Currently enabled only by HNSW_RABITQ.
+    // Store one complete scalar code per dimension in a dense n-bit stream.
+    // This combines the sign bit and extra bits at build time while retaining
+    // the exact nbits/dimension budget. For nbits=8 this is one byte/dimension.
+    // The legacy name is retained temporarily for Ixrb source compatibility.
     bool byte_layout = false;
 
     RaBitQuantizer(

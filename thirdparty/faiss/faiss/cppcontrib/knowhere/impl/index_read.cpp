@@ -700,8 +700,8 @@ static void finalize_and_validate_RaBitQ_index(::faiss::IndexRaBitQ* idxq) {
             idxq->rabitq.nb_bits >= 1 && idxq->rabitq.nb_bits <= 9,
             "IndexRaBitQ nb_bits must be in [1, 9]");
     FAISS_THROW_IF_NOT_MSG(
-            !idxq->rabitq.byte_layout || idxq->rabitq.nb_bits == 8,
-            "IndexRaBitQ byte layout requires nb_bits=8");
+            !idxq->rabitq.byte_layout || idxq->rabitq.nb_bits > 1,
+            "IndexRaBitQ dense layout requires nb_bits>1");
 
     const size_t expected_code_size =
             idxq->rabitq.compute_code_size(idxq->d, idxq->rabitq.nb_bits);
@@ -1124,12 +1124,16 @@ Index* read_index(IOReader* f, int io_flags) {
         }
     } else if (
             h == fourcc("Ixrq") || h == fourcc("Ixrr") ||
-            h == fourcc("Ixrb")) {
+            h == fourcc("Ixrb") || h == fourcc("Ixrd")) {
         auto idxq = std::make_unique<::faiss::IndexRaBitQ>();
         read_index_header(idxq.get(), f);
         read_RaBitQuantizer(
                 &idxq->rabitq, f, /*multi_bit=*/h != fourcc("Ixrq"));
-        idxq->rabitq.byte_layout = h == fourcc("Ixrb");
+        idxq->rabitq.byte_layout =
+                h == fourcc("Ixrb") || h == fourcc("Ixrd");
+        FAISS_THROW_IF_NOT_MSG(
+                h != fourcc("Ixrb") || idxq->rabitq.nb_bits == 8,
+                "legacy IndexRaBitQ byte layout requires nb_bits=8");
         READVECTOR(idxq->codes);
         READVECTOR(idxq->center);
         READ1(idxq->qb);
