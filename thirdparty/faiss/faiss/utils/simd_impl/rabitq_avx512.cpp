@@ -878,7 +878,8 @@ inline float ip_packed_8_avx512(
         const __m512i values = _mm512_and_si512(
                 _mm512_srlv_epi64(_mm512_set1_epi64(packed), shifts),
                 value_mask);
-        const __m256 extra_values = _mm512_cvtepi64_ps(values);
+        const __m256 extra_values =
+                _mm256_cvtepi32_ps(_mm512_cvtepi64_epi32(values));
 
         const __m256i sign_cmp = _mm256_cmpgt_epi32(
                 _mm256_and_si256(
@@ -940,7 +941,8 @@ inline void ip_packed_8_batch_4_avx512(
             const __m512i values = _mm512_and_si512(
                     _mm512_srlv_epi64(_mm512_set1_epi64(packed), shifts),
                     value_mask);
-            const __m256 extra_values = _mm512_cvtepi64_ps(values);
+            const __m256 extra_values =
+                    _mm256_cvtepi32_ps(_mm512_cvtepi64_epi32(values));
 
             const __m256i sign_cmp = _mm256_cmpgt_epi32(
                     _mm256_and_si256(
