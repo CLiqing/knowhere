@@ -971,6 +971,142 @@ inline void ip_packed_8_batch_4_avx512(
             ip_scalar(sign_bits[3], ex_codes[3], rotated_q, i, d, ExBits, cb);
 }
 
+template <size_t ExBits>
+inline __m256i unpack_packed_8_avx512(
+        const uint8_t* __restrict ex_code,
+        const __m512i shifts,
+        const __m512i value_mask) {
+    uint64_t packed = 0;
+    memcpy(&packed, ex_code, ExBits);
+    const __m512i values = _mm512_and_si512(
+            _mm512_srlv_epi64(_mm512_set1_epi64(packed), shifts),
+            value_mask);
+    return _mm512_cvtepi64_epi32(values);
+}
+
+template <size_t ExBits>
+inline float ip_packed_16_avx512(
+        const uint8_t* __restrict sign_bits,
+        const uint8_t* __restrict ex_code,
+        const float* __restrict rotated_q,
+        size_t d,
+        float cb) {
+    static_assert(ExBits >= 5 && ExBits <= 7);
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 v_one = _mm512_set1_ps(1.0f);
+    const __m512 v_cb = _mm512_set1_ps(cb);
+    const __m512 v_sign_weight =
+            _mm512_set1_ps(static_cast<float>(1u << ExBits));
+    const __m512i shifts = _mm512_setr_epi64(
+            0,
+            ExBits,
+            2 * ExBits,
+            3 * ExBits,
+            4 * ExBits,
+            5 * ExBits,
+            6 * ExBits,
+            7 * ExBits);
+    const __m512i value_mask = _mm512_set1_epi64((1u << ExBits) - 1);
+
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const uint8_t* block = ex_code + (i / 8) * ExBits;
+        const __m256i lo =
+                unpack_packed_8_avx512<ExBits>(block, shifts, value_mask);
+        const __m256i hi = unpack_packed_8_avx512<ExBits>(
+                block + ExBits, shifts, value_mask);
+        const __m512i values = _mm512_inserti64x4(
+                _mm512_castsi256_si512(lo), hi, 1);
+        const __m512 extra_values = _mm512_cvtepi32_ps(values);
+
+        uint16_t sign_plane = 0;
+        memcpy(&sign_plane, sign_bits + i / 8, sizeof(sign_plane));
+        const __m512 sign_values = _mm512_mul_ps(
+                _mm512_maskz_mov_ps(_cvtu32_mask16(sign_plane), v_one),
+                v_sign_weight);
+        const __m512 reconstruction = _mm512_add_ps(
+                _mm512_add_ps(extra_values, sign_values), v_cb);
+        acc = _mm512_fmadd_ps(
+                _mm512_loadu_ps(rotated_q + i), reconstruction, acc);
+    }
+
+    return _mm512_reduce_add_ps(acc) +
+            ip_scalar(
+                   sign_bits, ex_code, rotated_q, i, d, ExBits, cb);
+}
+
+template <size_t ExBits>
+inline void ip_packed_16_batch_4_avx512(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        float cb,
+        float out[4]) {
+    static_assert(ExBits >= 5 && ExBits <= 7);
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    const __m512 v_one = _mm512_set1_ps(1.0f);
+    const __m512 v_cb = _mm512_set1_ps(cb);
+    const __m512 v_sign_weight =
+            _mm512_set1_ps(static_cast<float>(1u << ExBits));
+    const __m512i shifts = _mm512_setr_epi64(
+            0,
+            ExBits,
+            2 * ExBits,
+            3 * ExBits,
+            4 * ExBits,
+            5 * ExBits,
+            6 * ExBits,
+            7 * ExBits);
+    const __m512i value_mask = _mm512_set1_epi64((1u << ExBits) - 1);
+
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 query = _mm512_loadu_ps(rotated_q + i);
+
+        auto reconstruct = [&](size_t code_index) {
+            const uint8_t* block =
+                    ex_codes[code_index] + (i / 8) * ExBits;
+            const __m256i lo =
+                    unpack_packed_8_avx512<ExBits>(block, shifts, value_mask);
+            const __m256i hi = unpack_packed_8_avx512<ExBits>(
+                    block + ExBits, shifts, value_mask);
+            const __m512i values = _mm512_inserti64x4(
+                    _mm512_castsi256_si512(lo), hi, 1);
+            const __m512 extra_values = _mm512_cvtepi32_ps(values);
+
+            uint16_t sign_plane = 0;
+            memcpy(
+                    &sign_plane,
+                    sign_bits[code_index] + i / 8,
+                    sizeof(sign_plane));
+            const __m512 sign_values = _mm512_mul_ps(
+                    _mm512_maskz_mov_ps(
+                            _cvtu32_mask16(sign_plane), v_one),
+                    v_sign_weight);
+            return _mm512_add_ps(
+                    _mm512_add_ps(extra_values, sign_values), v_cb);
+        };
+
+        acc0 = _mm512_fmadd_ps(query, reconstruct(0), acc0);
+        acc1 = _mm512_fmadd_ps(query, reconstruct(1), acc1);
+        acc2 = _mm512_fmadd_ps(query, reconstruct(2), acc2);
+        acc3 = _mm512_fmadd_ps(query, reconstruct(3), acc3);
+    }
+
+    out[0] = _mm512_reduce_add_ps(acc0) +
+            ip_scalar(sign_bits[0], ex_codes[0], rotated_q, i, d, ExBits, cb);
+    out[1] = _mm512_reduce_add_ps(acc1) +
+            ip_scalar(sign_bits[1], ex_codes[1], rotated_q, i, d, ExBits, cb);
+    out[2] = _mm512_reduce_add_ps(acc2) +
+            ip_scalar(sign_bits[2], ex_codes[2], rotated_q, i, d, ExBits, cb);
+    out[3] = _mm512_reduce_add_ps(acc3) +
+            ip_scalar(sign_bits[3], ex_codes[3], rotated_q, i, d, ExBits, cb);
+}
+
 #if FAISS_RABITQ_HAS_BMI2_TARGET
 FAISS_RABITQ_TARGET_BMI2 inline float ip_bitplane_avx512(
         const uint8_t* __restrict sign_bits,
@@ -1119,13 +1255,13 @@ float compute_inner_product<SIMDLevel::AVX512>(
 
     switch (ex_bits) {
         case 5:
-            return ip_packed_8_avx512<5>(
+            return ip_packed_16_avx512<5>(
                     sign_bits, ex_code, rotated_q, d, cb);
         case 6:
-            return ip_packed_8_avx512<6>(
+            return ip_packed_16_avx512<6>(
                     sign_bits, ex_code, rotated_q, d, cb);
         case 7:
-            return ip_packed_8_avx512<7>(
+            return ip_packed_16_avx512<7>(
                     sign_bits, ex_code, rotated_q, d, cb);
         default:
             break;
@@ -1154,15 +1290,15 @@ void compute_inner_product_batch_4<SIMDLevel::AVX512>(
         float out[4]) {
     switch (ex_bits) {
         case 5:
-            ip_packed_8_batch_4_avx512<5>(
+            ip_packed_16_batch_4_avx512<5>(
                     sign_bits, ex_codes, rotated_q, d, cb, out);
             return;
         case 6:
-            ip_packed_8_batch_4_avx512<6>(
+            ip_packed_16_batch_4_avx512<6>(
                     sign_bits, ex_codes, rotated_q, d, cb, out);
             return;
         case 7:
-            ip_packed_8_batch_4_avx512<7>(
+            ip_packed_16_batch_4_avx512<7>(
                     sign_bits, ex_codes, rotated_q, d, cb, out);
             return;
         default:
