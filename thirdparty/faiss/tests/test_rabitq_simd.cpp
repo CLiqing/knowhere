@@ -440,6 +440,60 @@ static void check_multibit_inner_product_matches_scalar() {
     }
 }
 
+template <SIMDLevel SL>
+static void check_multibit_inner_product_batch_4_matches_single() {
+    std::mt19937 rng(20260824);
+    std::uniform_real_distribution<float> value_dist(-2.0f, 2.0f);
+    for (size_t d : kDims) {
+        std::vector<float> query(d);
+        for (float& value : query) {
+            value = value_dist(rng);
+        }
+        for (size_t extra_bits = 1; extra_bits <= 7; extra_bits++) {
+            std::vector<std::vector<uint8_t>> sign_storage(4);
+            std::vector<std::vector<uint8_t>> extra_storage(4);
+            const uint8_t* sign_bits[4];
+            const uint8_t* extra_codes[4];
+            for (size_t i = 0; i < 4; i++) {
+                sign_storage[i] = random_bytes(
+                        (d + 7) / 8, 81237 + d + extra_bits * 17 + i);
+                extra_storage[i] = random_bytes(
+                        (d * extra_bits + 7) / 8,
+                        61971 + d + extra_bits * 17 + i);
+                sign_bits[i] = sign_storage[i].data();
+                extra_codes[i] = extra_storage[i].data();
+            }
+
+            constexpr float cb = -3.25f;
+            float actual[4];
+            faiss::rabitq::multibit::compute_inner_product_batch_4<SL>(
+                    sign_bits,
+                    extra_codes,
+                    query.data(),
+                    d,
+                    extra_bits,
+                    cb,
+                    actual);
+            for (size_t i = 0; i < 4; i++) {
+                const float expected =
+                        faiss::rabitq::multibit::compute_inner_product<SL>(
+                                sign_bits[i],
+                                extra_codes[i],
+                                query.data(),
+                                d,
+                                extra_bits,
+                                cb);
+                EXPECT_NEAR(
+                        actual[i],
+                        expected,
+                        std::max(1e-4f, std::abs(expected) * 1e-5f))
+                        << "d=" << d << " extra_bits=" << extra_bits
+                        << " code=" << i;
+            }
+        }
+    }
+}
+
 TEST(RaBitQSelectedFloatSum, Avx2MatchesScalar) {
     if (!faiss::SIMDConfig::is_simd_level_available(SIMDLevel::AVX2)) {
         GTEST_SKIP() << "AVX2 is not available on this CPU";
@@ -454,6 +508,13 @@ TEST(RaBitQMultiBitInnerProduct, Avx2MatchesScalar) {
     check_multibit_inner_product_matches_scalar<SIMDLevel::AVX2>();
 }
 
+TEST(RaBitQMultiBitInnerProductBatch4, Avx2MatchesSingle) {
+    if (!faiss::SIMDConfig::is_simd_level_available(SIMDLevel::AVX2)) {
+        GTEST_SKIP() << "AVX2 is not available on this CPU";
+    }
+    check_multibit_inner_product_batch_4_matches_single<SIMDLevel::AVX2>();
+}
+
 TEST(RaBitQSelectedFloatSum, Avx512MatchesScalar) {
     if (!faiss::SIMDConfig::is_simd_level_available(SIMDLevel::AVX512)) {
         GTEST_SKIP() << "AVX512 is not available on this CPU";
@@ -466,4 +527,10 @@ TEST(RaBitQMultiBitInnerProduct, Avx512MatchesScalar) {
         GTEST_SKIP() << "AVX512 is not available on this CPU";
     }
     check_multibit_inner_product_matches_scalar<SIMDLevel::AVX512>();
+}
+TEST(RaBitQMultiBitInnerProductBatch4, Avx512MatchesSingle) {
+    if (!faiss::SIMDConfig::is_simd_level_available(SIMDLevel::AVX512)) {
+        GTEST_SKIP() << "AVX512 is not available on this CPU";
+    }
+    check_multibit_inner_product_batch_4_matches_single<SIMDLevel::AVX512>();
 }

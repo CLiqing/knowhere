@@ -432,6 +432,16 @@ float compute_inner_product<SIMDLevel::AVX512>(
         float cb);
 
 template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]);
+
+template <>
 float compute_inner_product<SIMDLevel::AVX512_SPR>(
         const uint8_t* __restrict sign_bits,
         const uint8_t* __restrict ex_code,
@@ -441,6 +451,19 @@ float compute_inner_product<SIMDLevel::AVX512_SPR>(
         float cb) {
     return compute_inner_product<SIMDLevel::AVX512>(
             sign_bits, ex_code, rotated_q, d, ex_bits, cb);
+}
+
+template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX512_SPR>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]) {
+    compute_inner_product_batch_4<SIMDLevel::AVX512>(
+            sign_bits, ex_codes, rotated_q, d, ex_bits, cb, out);
 }
 
 } // namespace faiss::rabitq::multibit

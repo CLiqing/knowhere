@@ -226,6 +226,54 @@ void RaBitQuantizer::decode_core(
 
 namespace {
 
+template <SIMDLevel SL>
+void distance_to_code_full_batch_4_impl(
+        const uint8_t* const codes[4],
+        size_t d,
+        size_t nb_bits,
+        const float* rotated_q,
+        float qr_base,
+        MetricType metric_type,
+        float out[4]) {
+    const size_t ex_bits = nb_bits - 1;
+    if (ex_bits == 0) {
+        FAISS_THROW_MSG("multi-bit batch helper requires extra bits");
+    }
+
+    const size_t code_size_base = (d + 7) / 8;
+    const size_t ex_offset =
+            code_size_base + sizeof(SignBitFactorsWithError);
+    const size_t ex_code_size = (d * ex_bits + 7) / 8;
+    const uint8_t* sign_bits[4];
+    const uint8_t* ex_codes[4];
+    const ExtraBitsFactors* ex_factors[4];
+    for (size_t i = 0; i < 4; i++) {
+        sign_bits[i] = codes[i];
+        ex_codes[i] = codes[i] + ex_offset;
+        ex_factors[i] = reinterpret_cast<const ExtraBitsFactors*>(
+                ex_codes[i] + ex_code_size);
+    }
+
+    const float cb = -(static_cast<float>(1 << ex_bits) - 0.5f);
+    float inner_products[4];
+    rabitq::multibit::compute_inner_product_batch_4<SL>(
+            sign_bits,
+            ex_codes,
+            rotated_q,
+            d,
+            ex_bits,
+            cb,
+            inner_products);
+
+    for (size_t i = 0; i < 4; i++) {
+        float distance = qr_base + ex_factors[i]->f_add_ex +
+                ex_factors[i]->f_rescale_ex * inner_products[i];
+        out[i] = metric_type == MetricType::METRIC_L2
+                ? std::max(0.0f, distance)
+                : distance;
+    }
+}
+
 // Distance computers templatized on SIMDLevel to avoid per-call dynamic
 // dispatch. The SIMDLevel is baked in at construction time via
 // get_distance_computer, so virtual calls through the base class go
@@ -319,6 +367,41 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
                 d,
                 ex_bits,
                 metric_type);
+    }
+
+    void distance_to_code_batch_4(
+            const uint8_t* code0,
+            const uint8_t* code1,
+            const uint8_t* code2,
+            const uint8_t* code3,
+            float& dis0,
+            float& dis1,
+            float& dis2,
+            float& dis3) final {
+        if (nb_bits == 1) {
+            dis0 = distance_to_code_full(code0);
+            dis1 = distance_to_code_full(code1);
+            dis2 = distance_to_code_full(code2);
+            dis3 = distance_to_code_full(code3);
+            return;
+        }
+        const uint8_t* codes[4] = {code0, code1, code2, code3};
+        float distances[4];
+        const float qr_base = metric_type == MetricType::METRIC_INNER_PRODUCT
+                ? query_fac.q_dot_c
+                : query_fac.qr_to_c_L2sqr;
+        distance_to_code_full_batch_4_impl<SL>(
+                codes,
+                d,
+                nb_bits,
+                rotated_q.data(),
+                qr_base,
+                metric_type,
+                distances);
+        dis0 = distances[0];
+        dis1 = distances[1];
+        dis2 = distances[2];
+        dis3 = distances[3];
     }
 
     void set_query(const float* x) final {
@@ -532,6 +615,41 @@ struct RaBitQDistanceComputerQ final : RaBitQDistanceComputer {
                 d,
                 ex_bits,
                 metric_type);
+    }
+
+    void distance_to_code_batch_4(
+            const uint8_t* code0,
+            const uint8_t* code1,
+            const uint8_t* code2,
+            const uint8_t* code3,
+            float& dis0,
+            float& dis1,
+            float& dis2,
+            float& dis3) final {
+        if (nb_bits == 1) {
+            dis0 = distance_to_code_full(code0);
+            dis1 = distance_to_code_full(code1);
+            dis2 = distance_to_code_full(code2);
+            dis3 = distance_to_code_full(code3);
+            return;
+        }
+        const uint8_t* codes[4] = {code0, code1, code2, code3};
+        float distances[4];
+        const float qr_base = metric_type == MetricType::METRIC_INNER_PRODUCT
+                ? query_fac.q_dot_c
+                : query_fac.qr_to_c_L2sqr;
+        distance_to_code_full_batch_4_impl<SL>(
+                codes,
+                d,
+                nb_bits,
+                rotated_q.data(),
+                qr_base,
+                metric_type,
+                distances);
+        dis0 = distances[0];
+        dis1 = distances[1];
+        dis2 = distances[2];
+        dis3 = distances[3];
     }
 
     void set_query(const float* x) final {

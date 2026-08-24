@@ -814,6 +814,80 @@ FAISS_RABITQ_TARGET_BMI2 inline float ip_bitplane_avx512(
     result += ip_scalar(sign_bits, ex_code, rotated_q, i, d, ex_bits, cb);
     return result;
 }
+
+FAISS_RABITQ_TARGET_BMI2 inline void ip_bitplane_batch_4_avx512(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]) {
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    const __m512 v_one = _mm512_set1_ps(1.0f);
+    const __m512 v_cb = _mm512_set1_ps(cb);
+    const __m512 v_sign_weight =
+            _mm512_set1_ps(static_cast<float>(1u << ex_bits));
+
+    uint64_t pext_masks[4];
+    __m512 v_weights[4];
+    for (size_t b = 0; b < ex_bits; b++) {
+        uint64_t mask = 0;
+        for (int j = 0; j < 16; j++) {
+            mask |= (1ULL << (j * ex_bits + b));
+        }
+        pext_masks[b] = mask;
+        v_weights[b] = _mm512_set1_ps(static_cast<float>(1u << b));
+    }
+
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 query = _mm512_loadu_ps(rotated_q + i);
+
+        auto reconstruct = [&](size_t code_index) FAISS_RABITQ_TARGET_BMI2 {
+            uint16_t sign_plane = 0;
+            memcpy(
+                    &sign_plane,
+                    sign_bits[code_index] + i / 8,
+                    sizeof(sign_plane));
+            __m512 reconstruction = _mm512_mul_ps(
+                    _mm512_maskz_mov_ps(_cvtu32_mask16(sign_plane), v_one),
+                    v_sign_weight);
+
+            uint64_t extra_bits = 0;
+            memcpy(
+                    &extra_bits,
+                    ex_codes[code_index] + (i / 8) * ex_bits,
+                    sizeof(extra_bits));
+            for (size_t b = 0; b < ex_bits; b++) {
+                const uint16_t plane = static_cast<uint16_t>(
+                        _pext_u64(extra_bits, pext_masks[b]));
+                const __m512 plane_values =
+                        _mm512_maskz_mov_ps(_cvtu32_mask16(plane), v_one);
+                reconstruction = _mm512_fmadd_ps(
+                        plane_values, v_weights[b], reconstruction);
+            }
+            return _mm512_add_ps(reconstruction, v_cb);
+        };
+
+        acc0 = _mm512_fmadd_ps(query, reconstruct(0), acc0);
+        acc1 = _mm512_fmadd_ps(query, reconstruct(1), acc1);
+        acc2 = _mm512_fmadd_ps(query, reconstruct(2), acc2);
+        acc3 = _mm512_fmadd_ps(query, reconstruct(3), acc3);
+    }
+
+    out[0] = _mm512_reduce_add_ps(acc0) +
+            ip_scalar(sign_bits[0], ex_codes[0], rotated_q, i, d, ex_bits, cb);
+    out[1] = _mm512_reduce_add_ps(acc1) +
+            ip_scalar(sign_bits[1], ex_codes[1], rotated_q, i, d, ex_bits, cb);
+    out[2] = _mm512_reduce_add_ps(acc2) +
+            ip_scalar(sign_bits[2], ex_codes[2], rotated_q, i, d, ex_bits, cb);
+    out[3] = _mm512_reduce_add_ps(acc3) +
+            ip_scalar(sign_bits[3], ex_codes[3], rotated_q, i, d, ex_bits, cb);
+}
 #endif
 
 } // namespace
@@ -840,6 +914,28 @@ float compute_inner_product<SIMDLevel::AVX512>(
     }
 #endif
     return ip_scalar(sign_bits, ex_code, rotated_q, 0, d, ex_bits, cb);
+}
+
+template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]) {
+#if FAISS_RABITQ_HAS_BMI2_TARGET
+    if (ex_bits <= 4 && cpu_supports_bmi2()) {
+        ip_bitplane_batch_4_avx512(
+                sign_bits, ex_codes, rotated_q, d, ex_bits, cb, out);
+        return;
+    }
+#endif
+    for (size_t i = 0; i < 4; i++) {
+        out[i] = compute_inner_product<SIMDLevel::AVX512>(
+                sign_bits[i], ex_codes[i], rotated_q, d, ex_bits, cb);
+    }
 }
 
 #undef FAISS_RABITQ_TARGET_BMI2

@@ -414,6 +414,57 @@ float compute_inner_product(
         size_t ex_bits,
         float cb);
 
+/** Compute four independent multi-bit inner products against one query.
+ *
+ * HNSW evaluates graph neighbors in groups of four. Keeping the four
+ * accumulators in one dimension loop amortizes query loads and exposes ILP
+ * without requiring the database codes to be contiguous.
+ */
+template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
+inline void compute_inner_product_batch_4(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]) {
+    for (size_t i = 0; i < 4; i++) {
+        out[i] = compute_inner_product<SL>(
+                sign_bits[i], ex_codes[i], rotated_q, d, ex_bits, cb);
+    }
+}
+
+template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX2>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]);
+
+template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]);
+
+template <>
+void compute_inner_product_batch_4<SIMDLevel::AVX512_SPR>(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        size_t ex_bits,
+        float cb,
+        float out[4]);
+
 // NONE specialization — pure scalar
 template <>
 inline float compute_inner_product<SIMDLevel::NONE>(
@@ -425,5 +476,4 @@ inline float compute_inner_product<SIMDLevel::NONE>(
         float cb) {
     return ip_scalar(sign_bits, ex_code, rotated_q, 0, d, ex_bits, cb);
 }
-
 } // namespace faiss::rabitq::multibit
