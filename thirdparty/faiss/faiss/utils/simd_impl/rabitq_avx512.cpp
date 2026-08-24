@@ -842,6 +842,133 @@ FAISS_RABITQ_TARGET_BMI2 inline void ip_bitplane_batch_4_avx2(
 }
 #endif
 
+// For five to seven extra bits, eight packed coordinates still fit in one
+// uint64_t. Extract the per-coordinate integers directly with AVX-512
+// variable shifts instead of rebuilding them one bitplane at a time.
+template <size_t ExBits>
+inline float ip_packed_8_avx512(
+        const uint8_t* __restrict sign_bits,
+        const uint8_t* __restrict ex_code,
+        const float* __restrict rotated_q,
+        size_t d,
+        float cb) {
+    static_assert(ExBits >= 5 && ExBits <= 7);
+    __m256 acc = _mm256_setzero_ps();
+    const __m256i bit_pos =
+            _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256 v_cb = _mm256_set1_ps(cb);
+    const __m256 v_sign_weight =
+            _mm256_set1_ps(static_cast<float>(1u << ExBits));
+    const __m512i shifts = _mm512_setr_epi64(
+            0,
+            ExBits,
+            2 * ExBits,
+            3 * ExBits,
+            4 * ExBits,
+            5 * ExBits,
+            6 * ExBits,
+            7 * ExBits);
+    const __m512i value_mask = _mm512_set1_epi64((1u << ExBits) - 1);
+
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        uint64_t packed = 0;
+        memcpy(&packed, ex_code + (i / 8) * ExBits, ExBits);
+        const __m512i values = _mm512_and_si512(
+                _mm512_srlv_epi64(_mm512_set1_epi64(packed), shifts),
+                value_mask);
+        const __m256 extra_values = _mm512_cvtepi64_ps(values);
+
+        const __m256i sign_cmp = _mm256_cmpgt_epi32(
+                _mm256_and_si256(
+                        _mm256_set1_epi32(sign_bits[i / 8]), bit_pos),
+                zero);
+        const __m256 sign_values = _mm256_and_ps(
+                _mm256_castsi256_ps(sign_cmp), v_sign_weight);
+        const __m256 reconstruction = _mm256_add_ps(
+                _mm256_add_ps(extra_values, sign_values), v_cb);
+        acc = _mm256_fmadd_ps(
+                _mm256_loadu_ps(rotated_q + i), reconstruction, acc);
+    }
+
+    return hsum_avx2(acc) +
+            ip_scalar(
+                   sign_bits, ex_code, rotated_q, i, d, ExBits, cb);
+}
+
+template <size_t ExBits>
+inline void ip_packed_8_batch_4_avx512(
+        const uint8_t* const sign_bits[4],
+        const uint8_t* const ex_codes[4],
+        const float* __restrict rotated_q,
+        size_t d,
+        float cb,
+        float out[4]) {
+    static_assert(ExBits >= 5 && ExBits <= 7);
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    const __m256i bit_pos =
+            _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256 v_cb = _mm256_set1_ps(cb);
+    const __m256 v_sign_weight =
+            _mm256_set1_ps(static_cast<float>(1u << ExBits));
+    const __m512i shifts = _mm512_setr_epi64(
+            0,
+            ExBits,
+            2 * ExBits,
+            3 * ExBits,
+            4 * ExBits,
+            5 * ExBits,
+            6 * ExBits,
+            7 * ExBits);
+    const __m512i value_mask = _mm512_set1_epi64((1u << ExBits) - 1);
+
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256 query = _mm256_loadu_ps(rotated_q + i);
+
+        auto reconstruct = [&](size_t code_index) {
+            uint64_t packed = 0;
+            memcpy(
+                    &packed,
+                    ex_codes[code_index] + (i / 8) * ExBits,
+                    ExBits);
+            const __m512i values = _mm512_and_si512(
+                    _mm512_srlv_epi64(_mm512_set1_epi64(packed), shifts),
+                    value_mask);
+            const __m256 extra_values = _mm512_cvtepi64_ps(values);
+
+            const __m256i sign_cmp = _mm256_cmpgt_epi32(
+                    _mm256_and_si256(
+                            _mm256_set1_epi32(sign_bits[code_index][i / 8]),
+                            bit_pos),
+                    zero);
+            const __m256 sign_values = _mm256_and_ps(
+                    _mm256_castsi256_ps(sign_cmp), v_sign_weight);
+            return _mm256_add_ps(
+                    _mm256_add_ps(extra_values, sign_values), v_cb);
+        };
+
+        acc0 = _mm256_fmadd_ps(query, reconstruct(0), acc0);
+        acc1 = _mm256_fmadd_ps(query, reconstruct(1), acc1);
+        acc2 = _mm256_fmadd_ps(query, reconstruct(2), acc2);
+        acc3 = _mm256_fmadd_ps(query, reconstruct(3), acc3);
+    }
+
+    out[0] = hsum_avx2(acc0) +
+            ip_scalar(sign_bits[0], ex_codes[0], rotated_q, i, d, ExBits, cb);
+    out[1] = hsum_avx2(acc1) +
+            ip_scalar(sign_bits[1], ex_codes[1], rotated_q, i, d, ExBits, cb);
+    out[2] = hsum_avx2(acc2) +
+            ip_scalar(sign_bits[2], ex_codes[2], rotated_q, i, d, ExBits, cb);
+    out[3] = hsum_avx2(acc3) +
+            ip_scalar(sign_bits[3], ex_codes[3], rotated_q, i, d, ExBits, cb);
+}
+
 #if FAISS_RABITQ_HAS_BMI2_TARGET
 FAISS_RABITQ_TARGET_BMI2 inline float ip_bitplane_avx512(
         const uint8_t* __restrict sign_bits,
@@ -988,6 +1115,20 @@ float compute_inner_product<SIMDLevel::AVX512>(
         return ip_1exbit_avx512(sign_bits, ex_code, rotated_q, d, cb);
     }
 
+    switch (ex_bits) {
+        case 5:
+            return ip_packed_8_avx512<5>(
+                    sign_bits, ex_code, rotated_q, d, cb);
+        case 6:
+            return ip_packed_8_avx512<6>(
+                    sign_bits, ex_code, rotated_q, d, cb);
+        case 7:
+            return ip_packed_8_avx512<7>(
+                    sign_bits, ex_code, rotated_q, d, cb);
+        default:
+            break;
+    }
+
 #if FAISS_RABITQ_HAS_BMI2_TARGET
     if (ex_bits <= 4 && cpu_supports_bmi2()) {
         return ip_bitplane_avx512(
@@ -1009,6 +1150,22 @@ void compute_inner_product_batch_4<SIMDLevel::AVX512>(
         size_t ex_bits,
         float cb,
         float out[4]) {
+    switch (ex_bits) {
+        case 5:
+            ip_packed_8_batch_4_avx512<5>(
+                    sign_bits, ex_codes, rotated_q, d, cb, out);
+            return;
+        case 6:
+            ip_packed_8_batch_4_avx512<6>(
+                    sign_bits, ex_codes, rotated_q, d, cb, out);
+            return;
+        case 7:
+            ip_packed_8_batch_4_avx512<7>(
+                    sign_bits, ex_codes, rotated_q, d, cb, out);
+            return;
+        default:
+            break;
+    }
 #if FAISS_RABITQ_HAS_BMI2_TARGET
     if (ex_bits <= 4 && cpu_supports_bmi2()) {
         ip_bitplane_batch_4_avx512(
