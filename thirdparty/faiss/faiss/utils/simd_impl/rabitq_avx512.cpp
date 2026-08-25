@@ -644,6 +644,374 @@ namespace faiss::rabitq::multibit {
 
 namespace {
 
+template <size_t NBITS>
+inline __m256i dense_decode_8_i32_avx512(const uint8_t* code) {
+    static_assert(NBITS >= 2 && NBITS <= 8);
+    uint64_t packed = 0;
+    memcpy(&packed, code, NBITS);
+    constexpr uint64_t mask = (uint64_t{1} << NBITS) - 1;
+    return _mm256_setr_epi32(
+            (packed >> (0 * NBITS)) & mask,
+            (packed >> (1 * NBITS)) & mask,
+            (packed >> (2 * NBITS)) & mask,
+            (packed >> (3 * NBITS)) & mask,
+            (packed >> (4 * NBITS)) & mask,
+            (packed >> (5 * NBITS)) & mask,
+            (packed >> (6 * NBITS)) & mask,
+            (packed >> (7 * NBITS)) & mask);
+}
+
+template <size_t NBITS>
+inline __m512 dense_decode_16_avx512(const uint8_t* code) {
+    const __m256i lo = dense_decode_8_i32_avx512<NBITS>(code);
+    const __m256i hi = dense_decode_8_i32_avx512<NBITS>(code + NBITS);
+    const __m512i values = _mm512_inserti32x8(
+            _mm512_castsi256_si512(lo), hi, 1);
+    return _mm512_cvtepi32_ps(values);
+}
+
+inline __m512i dense_decode_3_64_u8_avx512(const uint8_t* code) {
+    const __m256i shuf_0 = _mm256_setr_epi8(
+            0, -1, 0, 1, 1, -1, 2, -1, 3, -1, 3, 4, 4, -1, 5, -1,
+            6, -1, 6, 7, 7, -1, 8, -1, 9, -1, 9, 10, 10, -1, 11, -1);
+    const __m256i shuf_1 = _mm256_setr_epi8(
+            0, -1, 1, -1, 1, 2, 2, -1, 3, -1, 4, -1, 4, 5, 5, -1,
+            6, -1, 7, -1, 7, 8, 8, -1, 9, -1, 10, -1, 10, 11, 11, -1);
+    const __m256i shuf_2 = _mm256_setr_epi8(
+            12, -1, 12, 13, 13, -1, 14, -1, 15, -1, 15, 0, 0, -1, 1, -1,
+            2, -1, 2, 3, 3, -1, 4, -1, 5, -1, 5, 6, 6, -1, 7, -1);
+    const __m256i shuf_3 = _mm256_setr_epi8(
+            12, -1, 13, -1, 13, 14, 14, -1, 15, -1, 0, -1, 0, 1, 1, -1,
+            2, -1, 3, -1, 3, 4, 4, -1, 5, -1, 6, -1, 6, 7, 7, -1);
+    const __m512i shuf_02 = _mm512_inserti32x8(
+            _mm512_castsi256_si512(shuf_0), shuf_2, 1);
+    const __m512i shuf_13 = _mm512_inserti32x8(
+            _mm512_castsi256_si512(shuf_1), shuf_3, 1);
+    const __m256i shifts_left = _mm256_setr_epi16(
+            5, 7, 1, 3, 5, 7, 1, 3, 5, 7, 1, 3, 5, 7, 1, 3);
+    const __m256i shifts_right = _mm256_setr_epi16(
+            0, 6, 4, 2, 0, 6, 4, 2, 0, 6, 4, 2, 0, 6, 4, 2);
+    const __m512i v_shl = _mm512_inserti32x8(
+            _mm512_castsi256_si512(shifts_left), shifts_left, 1);
+    const __m512i v_shr = _mm512_inserti32x8(
+            _mm512_castsi256_si512(shifts_right), shifts_right, 1);
+
+    const __m128i raw_0 = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(code));
+    const __m128i raw_2_low = _mm_loadl_epi64(
+            reinterpret_cast<const __m128i*>(code + 16));
+    const __m128i raw_2 = _mm_blend_epi16(raw_0, raw_2_low, 0x0f);
+    const __m256i raw_01 = _mm256_inserti32x4(
+            _mm256_castsi128_si256(raw_0), raw_0, 1);
+    const __m256i raw_23 = _mm256_inserti32x4(
+            _mm256_castsi128_si256(raw_2), raw_2, 1);
+    const __m512i raw = _mm512_inserti32x8(
+            _mm512_castsi256_si512(raw_01), raw_23, 1);
+    const __m512i right = _mm512_srlv_epi16(
+            _mm512_shuffle_epi8(raw, shuf_02), v_shr);
+    const __m512i left = _mm512_sllv_epi16(
+            _mm512_shuffle_epi8(raw, shuf_13), v_shl);
+    return _mm512_and_si512(
+            _mm512_mask_blend_epi8(0xaaaaaaaaaaaaaaaaULL, right, left),
+            _mm512_set1_epi8(7));
+}
+
+inline __m512i dense_decode_4_64_u8_avx512(const uint8_t* code) {
+    const __m256i packed = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(code));
+    const __m512i widened = _mm512_cvtepu8_epi16(packed);
+    return _mm512_and_si512(
+            _mm512_or_si512(
+                    widened,
+                    _mm512_slli_epi16(_mm512_srli_epi16(widened, 4), 8)),
+            _mm512_set1_epi16(0x0f0f));
+}
+
+inline __m512i dense_decode_5_64_u8_avx512(const uint8_t* code) {
+    const __m512i low = _mm512_zextsi256_si512(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(code)));
+    const __m128i high = _mm_loadl_epi64(
+            reinterpret_cast<const __m128i*>(code + 32));
+    const __m512i raw = _mm512_inserti32x4(low, high, 2);
+    const __m512i spread = _mm512_permutexvar_epi64(
+            _mm512_setr_epi64(0, 1, 1, 2, 2, 3, 3, 4), raw);
+    const __m512i shuf_a = _mm512_setr_epi64(
+            0x04030302ff01ff00ULL, 0x09080807ff06ff05ULL,
+            0x06050504ff03ff02ULL, 0x0b0a0a09ff08ff07ULL,
+            0x08070706ff05ff04ULL, 0x0d0c0c0bff0aff09ULL,
+            0x0a090908ff07ff06ULL, 0x0f0e0e0dff0cff0bULL);
+    const __m512i shuf_b = _mm512_setr_epi64(
+            0xff04ff0302010100ULL, 0xff09ff0807060605ULL,
+            0xff06ff0504030302ULL, 0xff0bff0a09080807ULL,
+            0xff08ff0706050504ULL, 0xff0dff0c0b0a0a09ULL,
+            0xff0aff0908070706ULL, 0xff0fff0e0d0c0c0bULL);
+    const __m512i right = _mm512_srlv_epi16(
+            _mm512_shuffle_epi8(spread, shuf_a),
+            _mm512_set1_epi64(0x0006000400020000ULL));
+    const __m512i left = _mm512_sllv_epi16(
+            _mm512_shuffle_epi8(spread, shuf_b),
+            _mm512_set1_epi64(0x0005000700010003ULL));
+    return _mm512_and_si512(
+            _mm512_mask_blend_epi8(0xaaaaaaaaaaaaaaaaULL, right, left),
+            _mm512_set1_epi8(0x1f));
+}
+
+inline __m512i dense_decode_6_64_u8_avx512(const uint8_t* code) {
+    const __m512i packed = _mm512_maskz_loadu_epi8(
+            (uint64_t{1} << 48) - 1, code);
+    const __m512i expanded = _mm512_permutexvar_epi32(
+            _mm512_setr_epi32(
+                    0, 1, 2, -1, 3, 4, 5, -1,
+                    6, 7, 8, -1, 9, 10, 11, -1),
+            packed);
+    const __m512i shuf_0 = _mm512_broadcast_i32x4(_mm_setr_epi8(
+            0, 1, 1, 2, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 10, 11));
+    const __m512i shuf_1 = _mm512_broadcast_i32x4(_mm_setr_epi8(
+            0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1));
+    const __m512i left = _mm512_sllv_epi16(
+            _mm512_shuffle_epi8(expanded, shuf_1),
+            _mm512_set1_epi32(0x00060002));
+    const __m512i right = _mm512_srlv_epi16(
+            _mm512_shuffle_epi8(expanded, shuf_0),
+            _mm512_set1_epi32(0x00040000));
+    return _mm512_and_si512(
+            _mm512_mask_blend_epi8(0x5555555555555555ULL, left, right),
+            _mm512_set1_epi8(0x3f));
+}
+
+template <size_t NBITS>
+inline __m512i dense_decode_64_u8_avx512(const uint8_t* code) {
+    if constexpr (NBITS == 3) {
+        return dense_decode_3_64_u8_avx512(code);
+    } else if constexpr (NBITS == 4) {
+        return dense_decode_4_64_u8_avx512(code);
+    } else if constexpr (NBITS == 5) {
+        return dense_decode_5_64_u8_avx512(code);
+    } else if constexpr (NBITS == 6) {
+        return dense_decode_6_64_u8_avx512(code);
+    } else {
+        static_assert(NBITS == 8);
+        return _mm512_loadu_si512(code);
+    }
+}
+
+inline void dense_fma_64_avx512(
+        __m512& acc,
+        __m512i decoded,
+        const float* query,
+        __m512 bias) {
+#define FAISS_RABITQ_DENSE_FMA_QUARTER(Q, BYTES)                         \
+    do {                                                               \
+        const __m512 values = _mm512_cvtepi32_ps(                       \
+                _mm512_cvtepu8_epi32(BYTES));                           \
+        acc = _mm512_fmadd_ps(                                          \
+                _mm512_loadu_ps(query + 16 * (Q)),                      \
+                _mm512_add_ps(values, bias),                            \
+                acc);                                                   \
+    } while (false)
+    FAISS_RABITQ_DENSE_FMA_QUARTER(0, _mm512_castsi512_si128(decoded));
+    FAISS_RABITQ_DENSE_FMA_QUARTER(
+            1, _mm512_extracti32x4_epi32(decoded, 1));
+    FAISS_RABITQ_DENSE_FMA_QUARTER(
+            2, _mm512_extracti32x4_epi32(decoded, 2));
+    FAISS_RABITQ_DENSE_FMA_QUARTER(
+            3, _mm512_extracti32x4_epi32(decoded, 3));
+#undef FAISS_RABITQ_DENSE_FMA_QUARTER
+}
+
+template <size_t NBITS>
+float ip_dense_avx512(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    if constexpr ((NBITS >= 3 && NBITS <= 6) || NBITS == 8) {
+        for (; i + 64 <= d; i += 64) {
+            dense_fma_64_avx512(
+                    acc,
+                    dense_decode_64_u8_avx512<NBITS>(
+                            code + (i * NBITS) / 8),
+                    query + i,
+                    bias);
+        }
+    }
+    for (; i + 16 <= d; i += 16) {
+        const __m512 values = dense_decode_16_avx512<NBITS>(
+                code + (i * NBITS) / 8);
+        acc = _mm512_fmadd_ps(
+                _mm512_loadu_ps(query + i),
+                _mm512_add_ps(values, bias),
+                acc);
+    }
+    return _mm512_reduce_add_ps(acc) +
+            compute_inner_product_dense<SIMDLevel::NONE>(
+                   code + (i * NBITS) / 8,
+                   query + i,
+                   d - i,
+                   NBITS,
+                   cb);
+}
+
+template <size_t NBITS>
+void ip_dense_batch_4_avx512(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    __m512 acc[4] = {
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps()};
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    if constexpr ((NBITS >= 3 && NBITS <= 6) || NBITS == 8) {
+        for (; i + 64 <= d; i += 64) {
+            for (size_t j = 0; j < 4; j++) {
+                dense_fma_64_avx512(
+                        acc[j],
+                        dense_decode_64_u8_avx512<NBITS>(
+                                codes[j] + (i * NBITS) / 8),
+                        query + i,
+                        bias);
+            }
+        }
+    }
+    for (; i + 16 <= d; i += 16) {
+        const __m512 q = _mm512_loadu_ps(query + i);
+        for (size_t j = 0; j < 4; j++) {
+            const __m512 values = dense_decode_16_avx512<NBITS>(
+                    codes[j] + (i * NBITS) / 8);
+            acc[j] = _mm512_fmadd_ps(
+                    q, _mm512_add_ps(values, bias), acc[j]);
+        }
+    }
+    for (size_t j = 0; j < 4; j++) {
+        out[j] = _mm512_reduce_add_ps(acc[j]) +
+                compute_inner_product_dense<SIMDLevel::NONE>(
+                        codes[j] + (i * NBITS) / 8,
+                        query + i,
+                        d - i,
+                        NBITS,
+                        cb);
+    }
+}
+
+} // namespace
+
+template <>
+float compute_inner_product_dense<SIMDLevel::AVX512>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        size_t nbits,
+        float cb) {
+#define FAISS_RABITQ_DENSE_CASE(N) \
+    case N:                           \
+        return ip_dense_avx512<N>(code, query, d, cb)
+    switch (nbits) {
+        FAISS_RABITQ_DENSE_CASE(2);
+        FAISS_RABITQ_DENSE_CASE(3);
+        FAISS_RABITQ_DENSE_CASE(4);
+        FAISS_RABITQ_DENSE_CASE(5);
+        FAISS_RABITQ_DENSE_CASE(6);
+        FAISS_RABITQ_DENSE_CASE(7);
+        FAISS_RABITQ_DENSE_CASE(8);
+        default:
+            return compute_inner_product_dense<SIMDLevel::NONE>(
+                    code, query, d, nbits, cb);
+    }
+#undef FAISS_RABITQ_DENSE_CASE
+}
+
+template <>
+void compute_inner_product_dense_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb,
+        float out[4]) {
+#define FAISS_RABITQ_DENSE_CASE(N) \
+    case N:                           \
+        return ip_dense_batch_4_avx512<N>(codes, query, d, cb, out)
+    switch (nbits) {
+        FAISS_RABITQ_DENSE_CASE(2);
+        FAISS_RABITQ_DENSE_CASE(3);
+        FAISS_RABITQ_DENSE_CASE(4);
+        FAISS_RABITQ_DENSE_CASE(5);
+        FAISS_RABITQ_DENSE_CASE(6);
+        FAISS_RABITQ_DENSE_CASE(7);
+        FAISS_RABITQ_DENSE_CASE(8);
+        default:
+            for (size_t i = 0; i < 4; i++) {
+                out[i] = compute_inner_product_dense<SIMDLevel::NONE>(
+                        codes[i], query, d, nbits, cb);
+            }
+    }
+#undef FAISS_RABITQ_DENSE_CASE
+}
+
+template <>
+float compute_inner_product_byte<SIMDLevel::AVX512>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    __m512 acc = _mm512_setzero_ps();
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m128i bytes = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(code + i));
+        const __m512 values = _mm512_cvtepi32_ps(
+                _mm512_cvtepu8_epi32(bytes));
+        acc = _mm512_fmadd_ps(
+                _mm512_loadu_ps(query + i),
+                _mm512_add_ps(values, bias),
+                acc);
+    }
+    return _mm512_reduce_add_ps(acc) +
+            ip_byte_scalar(code, query, i, d, cb);
+}
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    __m512 acc[4] = {
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps(),
+            _mm512_setzero_ps()};
+    const __m512 bias = _mm512_set1_ps(cb);
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 q = _mm512_loadu_ps(query + i);
+        for (size_t j = 0; j < 4; j++) {
+            const __m128i bytes = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(codes[j] + i));
+            const __m512 values = _mm512_cvtepi32_ps(
+                    _mm512_cvtepu8_epi32(bytes));
+            acc[j] = _mm512_fmadd_ps(
+                    q, _mm512_add_ps(values, bias), acc[j]);
+        }
+    }
+    for (size_t j = 0; j < 4; j++) {
+        out[j] = _mm512_reduce_add_ps(acc[j]) +
+                ip_byte_scalar(codes[j], query, i, d, cb);
+    }
+}
+
+namespace {
+
 #if (defined(__GNUC__) || defined(__clang__)) && \
         (defined(__x86_64__) || defined(__i386__))
 #define FAISS_RABITQ_HAS_BMI2_TARGET 1

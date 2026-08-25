@@ -419,6 +419,82 @@ float selected_float_sum<SIMDLevel::AVX512_SPR>(
 
 namespace faiss::rabitq::multibit {
 
+template <>
+float compute_inner_product_byte<SIMDLevel::AVX512>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb);
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]);
+
+template <>
+float compute_inner_product_dense<SIMDLevel::AVX512>(
+        const uint8_t* code,
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb);
+
+template <>
+void compute_inner_product_dense_batch_4<SIMDLevel::AVX512>(
+        const uint8_t* const codes[4],
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb,
+        float out[4]);
+
+template <>
+float compute_inner_product_byte<SIMDLevel::AVX512_SPR>(
+        const uint8_t* __restrict code,
+        const float* __restrict query,
+        size_t d,
+        float cb) {
+    return compute_inner_product_byte<SIMDLevel::AVX512>(
+            code, query, d, cb);
+}
+
+template <>
+void compute_inner_product_byte_batch_4<SIMDLevel::AVX512_SPR>(
+        const uint8_t* const codes[4],
+        const float* __restrict query,
+        size_t d,
+        float cb,
+        float out[4]) {
+    compute_inner_product_byte_batch_4<SIMDLevel::AVX512>(
+            codes, query, d, cb, out);
+}
+
+template <>
+float compute_inner_product_dense<SIMDLevel::AVX512_SPR>(
+        const uint8_t* code,
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb) {
+    return compute_inner_product_dense<SIMDLevel::AVX512>(
+            code, query, d, nbits, cb);
+}
+
+template <>
+void compute_inner_product_dense_batch_4<SIMDLevel::AVX512_SPR>(
+        const uint8_t* const codes[4],
+        const float* query,
+        size_t d,
+        size_t nbits,
+        float cb,
+        float out[4]) {
+    compute_inner_product_dense_batch_4<SIMDLevel::AVX512>(
+            codes, query, d, nbits, cb, out);
+}
+
 // Forward-declare the AVX512 floating-point inner-product kernel.
 // VPOPCNTDQ does not help this kernel (it operates on FP32), so we
 // reuse the AVX512 implementation rather than duplicate it.

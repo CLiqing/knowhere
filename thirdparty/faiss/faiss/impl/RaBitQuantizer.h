@@ -47,10 +47,17 @@ struct RaBitQuantizer : Quantizer {
     // - nb_bits = 2-9: multi-bit RaBitQ (1 sign bit + ex_bits extra bits)
     size_t nb_bits = 1;
 
+    // Store one complete scalar code per dimension in a dense n-bit stream.
+    // This combines the sign bit and extra bits at build time while retaining
+    // the exact nbits/dimension budget. For nbits=8 this is one byte/dimension.
+    // The legacy name is retained temporarily for Ixrb source compatibility.
+    bool byte_layout = false;
+
     RaBitQuantizer(
             size_t d = 0,
             MetricType metric = MetricType::METRIC_L2,
-            size_t nb_bits = 1);
+            size_t nb_bits = 1,
+            bool byte_layout = false);
 
     // Compute code size based on dimensionality and number of bits
     // Returns: size in bytes for one encoded vector
