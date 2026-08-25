@@ -14,11 +14,14 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "faiss/IndexRaBitQ.h"
+#include "faiss/impl/RaBitQUtils.h"
 #include "catch2/catch_approx.hpp"
 #include "catch2/catch_test_macros.hpp"
 #include "knowhere/bitsetview.h"
@@ -215,6 +218,11 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
         {knowhere::metric::L2, 127, 1, 8},
         {knowhere::metric::IP, 129, 1, 8},
         {knowhere::metric::L2, 129, 2, 0},
+        {knowhere::metric::IP, 65, 3, 0},
+        {knowhere::metric::L2, 64, 4, 0},
+        {knowhere::metric::IP, 65, 5, 0},
+        {knowhere::metric::L2, 64, 6, 0},
+        {knowhere::metric::L2, 128, 8, 0},
         {knowhere::metric::IP, 13, 9, 0},
     };
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
@@ -276,7 +284,8 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
         knowhere::BinarySet binary_set;
         REQUIRE(index.Serialize(binary_set) == knowhere::Status::success);
         REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IHNr"));
-        REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), scenario.rbq_bits == 1 ? "Ixrq" : "Ixrr"));
+        const char* storage_fourcc = scenario.rbq_bits == 1 ? "Ixrq" : "Ixrd";
+        REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), storage_fourcc));
 
         auto loaded = knowhere::IndexFactory::Instance()
                           .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_RABITQ, version)
@@ -290,6 +299,85 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
         REQUIRE(after_snapshot.distances == before_snapshot.distances);
 
         REQUIRE(index.Add(GenDataSet(8, scenario.dim, 501), json) == knowhere::Status::not_implemented);
+    }
+}
+
+TEST_CASE("RaBitQ dense layout preserves packed distances", "[hnsw_rabitq]") {
+    constexpr int64_t nb = 64;
+    constexpr int64_t nq = 2;
+    for (const int64_t dim : {13, 64, 65, 128, 129}) {
+        const auto base = GenDataSet(nb, dim, 1701 + dim);
+        const auto query = GenDataSet(nq, dim, 1801 + dim);
+        const auto* base_data = static_cast<const float*>(base->GetTensor());
+        const auto* query_data =
+                static_cast<const float*>(query->GetTensor());
+
+        for (const uint8_t bits : {2, 3, 4, 5, 6, 7, 8}) {
+            const size_t ex_bits = bits - 1;
+            for (const auto metric :
+                 {faiss::METRIC_L2, faiss::METRIC_INNER_PRODUCT}) {
+                faiss::IndexRaBitQ packed(dim, metric, bits, false);
+                faiss::IndexRaBitQ dense(dim, metric, bits, true);
+                packed.qb = 0;
+                dense.qb = 0;
+                packed.train(nb, base_data);
+                dense.train(nb, base_data);
+                packed.add(nb, base_data);
+                dense.add(nb, base_data);
+
+                for (int64_t i = 0; i < nb; ++i) {
+                    const uint8_t* packed_code =
+                            packed.codes.data() + i * packed.code_size;
+                    const uint8_t* dense_code =
+                            dense.codes.data() + i * dense.code_size;
+                    const uint8_t* extra_code = packed_code +
+                            (dim + 7) / 8 +
+                            sizeof(faiss::rabitq_utils::SignBitFactorsWithError);
+                    for (int64_t j = 0; j < dim; ++j) {
+                        const uint16_t sign =
+                                (packed_code[j / 8] & (1u << (j % 8))) != 0
+                                ? static_cast<uint16_t>(1u << ex_bits)
+                                : 0;
+                        const uint16_t extra = static_cast<uint16_t>(
+                                faiss::rabitq_utils::extract_code_inline(
+                                        extra_code, j, ex_bits));
+                        REQUIRE(faiss::rabitq_utils::extract_code_inline(
+                                        dense_code, j, bits) ==
+                                static_cast<uint16_t>(sign | extra));
+                    }
+                }
+
+                std::unique_ptr<faiss::DistanceComputer> packed_dc(
+                        packed.get_distance_computer());
+                std::unique_ptr<faiss::DistanceComputer> dense_dc(
+                        dense.get_distance_computer());
+                for (int64_t q = 0; q < nq; ++q) {
+                    packed_dc->set_query(query_data + q * dim);
+                    dense_dc->set_query(query_data + q * dim);
+                    for (int64_t i = 0; i < nb; ++i) {
+                        REQUIRE((*dense_dc)(i) ==
+                                Catch::Approx((*packed_dc)(i)).epsilon(2e-5));
+                    }
+                    for (int64_t i = 0; i + 3 < nb; i += 4) {
+                        float batch[4];
+                        dense_dc->distances_batch_4(
+                                i,
+                                i + 1,
+                                i + 2,
+                                i + 3,
+                                batch[0],
+                                batch[1],
+                                batch[2],
+                                batch[3]);
+                        for (int64_t j = 0; j < 4; ++j) {
+                            REQUIRE(batch[j] ==
+                                    Catch::Approx((*packed_dc)(i + j))
+                                            .epsilon(2e-5));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
