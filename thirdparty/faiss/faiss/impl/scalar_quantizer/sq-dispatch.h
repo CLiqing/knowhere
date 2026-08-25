@@ -680,6 +680,7 @@ InvertedListScanner* sq_select_InvertedListScanner<THE_LEVEL_TO_DISPATCH>(
         bool store_pairs,
         const IDSelector* sel,
         bool by_residual) {
+    bool use_batch_4 = false;
     auto scan = [&]<class DCClass>() -> InvertedListScanner* {
         if constexpr (DCClass::Sim::metric_type == METRIC_L2) {
             return new IVFSQScannerL2<DCClass>(
@@ -689,11 +690,18 @@ InvertedListScanner* sq_select_InvertedListScanner<THE_LEVEL_TO_DISPATCH>(
                     quantizer,
                     store_pairs,
                     sel,
-                    by_residual);
+                    by_residual,
+                    use_batch_4);
         } else if constexpr (
                 DCClass::Sim::metric_type == METRIC_INNER_PRODUCT) {
             return new IVFSQScannerIP<DCClass>(
-                    int(d), trained, code_size, store_pairs, sel, by_residual);
+                    int(d),
+                    trained,
+                    code_size,
+                    store_pairs,
+                    sel,
+                    by_residual,
+                    use_batch_4);
         } else {
             FAISS_THROW_MSG("unsupported metric type");
         }
@@ -703,10 +711,22 @@ InvertedListScanner* sq_select_InvertedListScanner<THE_LEVEL_TO_DISPATCH>(
             [&]<SIMDLevel SL2, class Similarity>() -> InvertedListScanner* {
         // Return nullptr for incompatible dimensions in SIMD cases
         if constexpr (SL2 != SIMDLevel::NONE) {
-            if (!is_dimension_compatible<SL2>(d)) {
+            const bool is_tqmse = qtype >= ScalarQuantizer::QT_1bit_tqmse &&
+                    qtype <= ScalarQuantizer::QT_8bit_tqmse;
+            constexpr size_t simd_width =
+                    (SL2 == SIMDLevel::AVX512 || SL2 == SIMDLevel::AVX512_SPR)
+                    ? 16
+                    : 8;
+            constexpr bool supports_scalar_tail =
+                    SL2 == SIMDLevel::AVX512 || SL2 == SIMDLevel::AVX2;
+            if (!is_dimension_compatible<SL2>(d) &&
+                !(supports_scalar_tail && is_tqmse && d >= simd_width)) {
                 return nullptr;
             }
         }
+        use_batch_4 = SL2 != SIMDLevel::NONE &&
+                qtype >= ScalarQuantizer::QT_1bit_tqmse &&
+                qtype <= ScalarQuantizer::QT_8bit_tqmse;
         switch (qtype) {
             case ScalarQuantizer::QT_8bit_uniform:
                 return scan.template operator()<DCTemplate<

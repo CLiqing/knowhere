@@ -299,9 +299,7 @@ struct QuantizerLloydMax<1, SIMDLevel::AVX512>
         using Base = QuantizerLloydMax<NBITS, SIMDLevel::NONE>;               \
                                                                               \
         QuantizerLloydMax(size_t d, const std::vector<float>& trained)        \
-                : Base(d, trained) {                                          \
-            assert(d % 16 == 0);                                              \
-        }                                                                     \
+                : Base(d, trained) {}                                         \
                                                                               \
         FAISS_ALWAYS_INLINE simd16float32                                     \
         reconstruct_16_components(const uint8_t* code, int i) const {         \
@@ -572,23 +570,46 @@ struct DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512>
     float compute_distance(const float* x, const uint8_t* code) const {
         Similarity sim(x);
         sim.begin_16();
-        for (size_t i = 0; i < quant.d; i += 16) {
+        const size_t simd_end = quant.d / 16 * 16;
+        for (size_t i = 0; i < simd_end; i += 16) {
             simd16float32 xi = quant.reconstruct_16_components(code, i);
             sim.add_16_components(xi);
         }
-        return sim.result_16();
+        float result = sim.result_16();
+        for (size_t i = simd_end; i < quant.d; ++i) {
+            const float xi = quant.reconstruct_component(code, i);
+            if constexpr (Similarity::metric_type == METRIC_INNER_PRODUCT) {
+                result += x[i] * xi;
+            } else {
+                const float delta = x[i] - xi;
+                result += delta * delta;
+            }
+        }
+        return result;
     }
 
     float compute_code_distance(const uint8_t* code1, const uint8_t* code2)
             const {
         Similarity sim(nullptr);
         sim.begin_16();
-        for (size_t i = 0; i < quant.d; i += 16) {
+        const size_t simd_end = quant.d / 16 * 16;
+        for (size_t i = 0; i < simd_end; i += 16) {
             simd16float32 x1 = quant.reconstruct_16_components(code1, i);
             simd16float32 x2 = quant.reconstruct_16_components(code2, i);
             sim.add_16_components_2(x1, x2);
         }
-        return sim.result_16();
+        float result = sim.result_16();
+        for (size_t i = simd_end; i < quant.d; ++i) {
+            const float x1 = quant.reconstruct_component(code1, i);
+            const float x2 = quant.reconstruct_component(code2, i);
+            if constexpr (Similarity::metric_type == METRIC_INNER_PRODUCT) {
+                result += x1 * x2;
+            } else {
+                const float delta = x1 - x2;
+                result += delta * delta;
+            }
+        }
+        return result;
     }
 
     void set_query(const float* x) final {
@@ -608,7 +629,8 @@ struct DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512>
     float query_to_code_predecoded(const uint8_t* code) const {
         Similarity sim(q_adj.data());
         sim.begin_16();
-        for (size_t i = 0; i < quant.d; i += 16) {
+        const size_t simd_end = quant.d / 16 * 16;
+        for (size_t i = 0; i < simd_end; i += 16) {
             simd16float32 xi = quant.decode_16_raw(code, i);
             sim.add_16_components(xi);
         }
@@ -647,7 +669,8 @@ struct DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512>
         sim2.begin_16();
         sim3.begin_16();
 
-        for (size_t i = 0; i < quant.d; i += 16) {
+        const size_t simd_end = quant.d / 16 * 16;
+        for (size_t i = 0; i < simd_end; i += 16) {
             simd16float32 xi0 = quant.reconstruct_16_components(code_0, i);
             simd16float32 xi1 = quant.reconstruct_16_components(code_1, i);
             simd16float32 xi2 = quant.reconstruct_16_components(code_2, i);
@@ -662,6 +685,27 @@ struct DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512>
         dis1 = sim1.result_16();
         dis2 = sim2.result_16();
         dis3 = sim3.result_16();
+        for (size_t i = simd_end; i < quant.d; ++i) {
+            const float x0 = quant.reconstruct_component(code_0, i);
+            const float x1 = quant.reconstruct_component(code_1, i);
+            const float x2 = quant.reconstruct_component(code_2, i);
+            const float x3 = quant.reconstruct_component(code_3, i);
+            if constexpr (Similarity::metric_type == METRIC_INNER_PRODUCT) {
+                dis0 += q[i] * x0;
+                dis1 += q[i] * x1;
+                dis2 += q[i] * x2;
+                dis3 += q[i] * x3;
+            } else {
+                const float d0 = q[i] - x0;
+                const float d1 = q[i] - x1;
+                const float d2 = q[i] - x2;
+                const float d3 = q[i] - x3;
+                dis0 += d0 * d0;
+                dis1 += d1 * d1;
+                dis2 += d2 * d2;
+                dis3 += d3 * d3;
+            }
+        }
     }
 };
 

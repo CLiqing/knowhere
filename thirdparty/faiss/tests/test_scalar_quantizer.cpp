@@ -150,7 +150,76 @@ void expect_lloyd_max_simd_dispatch_fallback_for_incompatible_dim(
 
     EXPECT_EQ(typeid(*quantizer_raw), typeid(ScalarLloydMaxQuantizer<NBits>));
     EXPECT_EQ(typeid(*dc_raw), typeid(ScalarLloydMaxL2DistanceComputer<NBits>));
-    EXPECT_EQ(typeid(*scanner_raw), typeid(ScalarLloydMaxL2Scanner<NBits>));
+    const bool scanner_supports_tail =
+            (level == faiss::SIMDLevel::AVX2 && d >= 8) ||
+            (level == faiss::SIMDLevel::AVX512 && d >= 16);
+    if (scanner_supports_tail) {
+        EXPECT_NE(typeid(*scanner_raw), typeid(ScalarLloydMaxL2Scanner<NBits>));
+    } else {
+        EXPECT_EQ(typeid(*scanner_raw), typeid(ScalarLloydMaxL2Scanner<NBits>));
+    }
+}
+
+void check_tqmse_scanner_tail_parity(
+        faiss::SIMDLevel level,
+        faiss::MetricType metric) {
+    ScopedSIMDLevel scoped(level);
+    constexpr size_t d = 100;
+    constexpr size_t n = 128;
+    constexpr size_t k = 1;
+    const auto qtype = faiss::ScalarQuantizer::QT_4bit_tqmse;
+    std::vector<float> xb = make_normalized_vectors(n, d);
+    std::vector<float> xq = make_normalized_vectors(1, d);
+
+    faiss::ScalarQuantizer sq(d, qtype);
+    sq.train(n, xb.data());
+    std::vector<uint8_t> codes(sq.code_size * n, 0);
+    sq.compute_codes(xb.data(), codes.data(), n);
+    std::vector<faiss::idx_t> ids(n);
+    for (size_t i = 0; i < n; ++i) {
+        ids[i] = i;
+    }
+
+    std::unique_ptr<faiss::InvertedListScanner> scalar_scanner(
+            faiss::scalar_quantizer::sq_select_InvertedListScanner<
+                    faiss::SIMDLevel::NONE>(
+                    qtype,
+                    metric,
+                    d,
+                    sq.code_size,
+                    sq.trained,
+                    nullptr,
+                    false,
+                    nullptr,
+                    false));
+    std::unique_ptr<faiss::InvertedListScanner> simd_scanner(
+            sq.select_InvertedListScanner(
+                    metric, nullptr, false, nullptr, false));
+    ASSERT_NE(scalar_scanner, nullptr);
+    ASSERT_NE(simd_scanner, nullptr);
+    scalar_scanner->set_query(xq.data());
+    simd_scanner->set_query(xq.data());
+    scalar_scanner->set_list(0, 0.0f);
+    simd_scanner->set_list(0, 0.0f);
+
+    for (size_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(
+                scalar_scanner->distance_to_code(
+                        codes.data() + i * sq.code_size),
+                simd_scanner->distance_to_code(codes.data() + i * sq.code_size),
+                1e-5);
+    }
+
+    float scalar_distance = metric == faiss::METRIC_L2 ? HUGE_VALF : -HUGE_VALF;
+    float simd_distance = scalar_distance;
+    faiss::idx_t scalar_id = -1;
+    faiss::idx_t simd_id = -1;
+    scalar_scanner->scan_codes(
+            n, codes.data(), ids.data(), &scalar_distance, &scalar_id, k);
+    simd_scanner->scan_codes(
+            n, codes.data(), ids.data(), &simd_distance, &simd_id, k);
+    EXPECT_EQ(scalar_id, simd_id);
+    EXPECT_NEAR(scalar_distance, simd_distance, 1e-5);
 }
 
 template <int NBits>
@@ -566,13 +635,14 @@ TEST(ScalarQuantizer, FullTQSymmetricDistanceMatchesDecodedReference) {
 
         for (auto metric : {faiss::METRIC_INNER_PRODUCT, faiss::METRIC_L2}) {
             SCOPED_TRACE(metric);
-            std::unique_ptr<faiss::ScalarQuantizer::SQDistanceComputer> dc(sq.get_distance_computer(metric));
+            std::unique_ptr<faiss::ScalarQuantizer::SQDistanceComputer> dc(
+                    sq.get_distance_computer(metric));
             ASSERT_NE(dc, nullptr);
             dc->codes = codes.data();
             dc->code_size = sq.code_size;
 
-            for (const auto& pair :
-                     std::array<std::pair<int, int>, 4>{{{0, 0}, {0, 1}, {2, 5}, {7, 3}}}) {
+            for (const auto& pair : std::array<std::pair<int, int>, 4>{
+                         {{0, 0}, {0, 1}, {2, 5}, {7, 3}}}) {
                 const float* a = decoded.data() + pair.first * d;
                 const float* b = decoded.data() + pair.second * d;
                 float reference = 0.0f;
@@ -584,7 +654,10 @@ TEST(ScalarQuantizer, FullTQSymmetricDistanceMatchesDecodedReference) {
                         reference += delta * delta;
                     }
                 }
-                EXPECT_NEAR(dc->symmetric_dis(pair.first, pair.second), reference, 1e-6f);
+                EXPECT_NEAR(
+                        dc->symmetric_dis(pair.first, pair.second),
+                        reference,
+                        1e-6f);
                 EXPECT_NEAR(
                         dc->symmetric_dis(pair.first, pair.second),
                         dc->symmetric_dis(pair.second, pair.first),
@@ -721,6 +794,18 @@ TEST(ScalarQuantizer, TQMSESimdDistancePathParity) {
                 level, faiss::ScalarQuantizer::QT_4bit_tqmse);
         check_lloyd_max_distance_path_parity<8>(
                 level, faiss::ScalarQuantizer::QT_8bit_tqmse);
+    }
+}
+
+TEST(ScalarQuantizer, TQMSESimdScannerTailParity) {
+    for (faiss::SIMDLevel level :
+         {faiss::SIMDLevel::AVX512, faiss::SIMDLevel::AVX2}) {
+        if (!faiss::SIMDConfig::is_simd_level_available(level)) {
+            continue;
+        }
+        SCOPED_TRACE(faiss::to_string(level));
+        check_tqmse_scanner_tail_parity(level, faiss::METRIC_INNER_PRODUCT);
+        check_tqmse_scanner_tail_parity(level, faiss::METRIC_L2);
     }
 }
 

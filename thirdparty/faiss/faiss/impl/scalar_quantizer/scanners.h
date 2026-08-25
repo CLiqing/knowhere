@@ -35,6 +35,62 @@ namespace scalar_quantizer {
 using QuantizerType = ScalarQuantizer::QuantizerType;
 using SQDistanceComputer = ScalarQuantizer::SQDistanceComputer;
 
+template <typename C, class DCClass>
+size_t run_scan_codes_batch_4(
+        const DCClass& dc,
+        size_t list_size,
+        const uint8_t* codes,
+        const idx_t* ids,
+        size_t code_size,
+        size_t list_no,
+        bool store_pairs,
+        float distance_offset,
+        ResultHandler& handler) {
+    size_t nup = 0;
+    float threshold = handler.threshold;
+    size_t j = 0;
+    for (; j + 4 <= list_size; j += 4) {
+        float distances[4];
+        dc.query_to_codes_batch_4(
+                codes,
+                codes + code_size,
+                codes + 2 * code_size,
+                codes + 3 * code_size,
+                distances[0],
+                distances[1],
+                distances[2],
+                distances[3]);
+        handler.stats.scan_cnt += 4;
+        for (size_t lane = 0; lane < 4; ++lane) {
+            const float distance = distance_offset + distances[lane];
+            if (C::cmp(threshold, distance)) {
+                const int64_t id = store_pairs ? lo_build(list_no, j + lane)
+                                               : ids[j + lane];
+                if (handler.add_result(distance, id)) {
+                    handler.stats.nheap_updates++;
+                    ++nup;
+                    threshold = handler.threshold;
+                }
+            }
+        }
+        codes += 4 * code_size;
+    }
+    for (; j < list_size; ++j) {
+        handler.stats.scan_cnt++;
+        const float distance = distance_offset + dc.query_to_code(codes);
+        if (C::cmp(threshold, distance)) {
+            const int64_t id = store_pairs ? lo_build(list_no, j) : ids[j];
+            if (handler.add_result(distance, id)) {
+                handler.stats.nheap_updates++;
+                ++nup;
+                threshold = handler.threshold;
+            }
+        }
+        codes += code_size;
+    }
+    return nup;
+}
+
 /*******************************************************************
  * IVFSQScannerIP / IVFSQScannerL2 — moved from anonymous namespace
  * in ScalarQuantizer.cpp
@@ -44,6 +100,7 @@ template <class DCClass>
 struct IVFSQScannerIP : InvertedListScanner {
     DCClass dc;
     bool by_residual;
+    bool use_batch_4;
 
     float accu0; /// added to all distances
 
@@ -53,8 +110,12 @@ struct IVFSQScannerIP : InvertedListScanner {
             size_t code_size,
             bool store_pairs,
             const IDSelector* sel,
-            bool by_residual)
-            : dc(d, trained), by_residual(by_residual), accu0(0) {
+            bool by_residual,
+            bool use_batch_4)
+            : dc(d, trained),
+              by_residual(by_residual),
+              use_batch_4(use_batch_4),
+              accu0(0) {
         this->store_pairs = store_pairs;
         this->sel = sel;
         this->code_size = code_size;
@@ -79,6 +140,18 @@ struct IVFSQScannerIP : InvertedListScanner {
             const uint8_t* codes,
             const idx_t* ids,
             ResultHandler& handler) const override {
+        if (use_batch_4 && this->sel == nullptr) {
+            return run_scan_codes_batch_4<CMin<float, idx_t>>(
+                    dc,
+                    list_size,
+                    codes,
+                    ids,
+                    this->code_size,
+                    this->list_no,
+                    this->store_pairs,
+                    accu0,
+                    handler);
+        }
         return run_scan_codes_fix_C<CMin<float, idx_t>>(
                 *this, list_size, codes, ids, handler);
     }
@@ -89,6 +162,7 @@ struct IVFSQScannerL2 : InvertedListScanner {
     DCClass dc;
 
     bool by_residual;
+    bool use_batch_4;
     const Index* quantizer;
     const float* x; /// current query
 
@@ -101,9 +175,11 @@ struct IVFSQScannerL2 : InvertedListScanner {
             const Index* quantizer,
             bool store_pairs,
             const IDSelector* sel,
-            bool by_residual)
+            bool by_residual,
+            bool use_batch_4)
             : dc(d, trained),
               by_residual(by_residual),
+              use_batch_4(use_batch_4),
               quantizer(quantizer),
               x(nullptr),
               tmp(d) {
@@ -138,6 +214,18 @@ struct IVFSQScannerL2 : InvertedListScanner {
             const uint8_t* codes,
             const idx_t* ids,
             ResultHandler& handler) const override {
+        if (use_batch_4 && this->sel == nullptr) {
+            return run_scan_codes_batch_4<CMax<float, idx_t>>(
+                    dc,
+                    list_size,
+                    codes,
+                    ids,
+                    this->code_size,
+                    this->list_no,
+                    this->store_pairs,
+                    0.0f,
+                    handler);
+        }
         return run_scan_codes_fix_C<CMax<float, idx_t>>(
                 *this, list_size, codes, ids, handler);
     }
