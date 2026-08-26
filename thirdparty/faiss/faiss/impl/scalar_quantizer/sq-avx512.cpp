@@ -83,17 +83,13 @@ FAISS_ALWAYS_INLINE __m512i unpack_16x3bit_to_u32(const uint8_t* code, int i) {
 }
 
 FAISS_ALWAYS_INLINE __m512i unpack_16x4bit_to_u32(const uint8_t* code, int i) {
-    const uint64_t packed = load_u64(code + (static_cast<size_t>(i) >> 1));
-    const __m256i shifts = _mm256_setr_epi32(0, 4, 8, 12, 16, 20, 24, 28);
-    const __m256i low = _mm256_and_si256(
-            _mm256_srlv_epi32(_mm256_set1_epi32((uint32_t)packed), shifts),
-            _mm256_set1_epi32(0xf));
-    const __m256i high = _mm256_and_si256(
-            _mm256_srlv_epi32(
-                    _mm256_set1_epi32((uint32_t)(packed >> 32)), shifts),
-            _mm256_set1_epi32(0xf));
-    __m512i indices = _mm512_castsi256_si512(low);
-    return _mm512_inserti32x8(indices, high, 1);
+    const __m128i packed = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(
+            code + (static_cast<size_t>(i) >> 1)));
+    const __m128i mask = _mm_set1_epi8(0x0f);
+    const __m128i low_nibbles = _mm_and_si128(packed, mask);
+    const __m128i high_nibbles = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+    const __m128i indices_u8 = _mm_unpacklo_epi8(low_nibbles, high_nibbles);
+    return _mm512_cvtepu8_epi32(indices_u8);
 }
 
 } // namespace
@@ -318,9 +314,34 @@ struct QuantizerLloydMax<1, SIMDLevel::AVX512>
 
 DEFINE_LLOYD_MAX_AVX512_MULTIBIT(2, unpack_16x2bit_to_u32(code, i));
 DEFINE_LLOYD_MAX_AVX512_MULTIBIT(3, unpack_16x3bit_to_u32(code, i));
-DEFINE_LLOYD_MAX_AVX512_MULTIBIT(4, unpack_16x4bit_to_u32(code, i));
 
 #undef DEFINE_LLOYD_MAX_AVX512_MULTIBIT
+
+// 4-bit Lloyd-Max AVX512: all 16 centroids fit in one ZMM register, so
+// decoding can use an in-register permutation instead of a gather.
+template <>
+struct QuantizerLloydMax<4, SIMDLevel::AVX512>
+        : QuantizerLloydMax<4, SIMDLevel::NONE> {
+    using Base = QuantizerLloydMax<4, SIMDLevel::NONE>;
+
+    QuantizerLloydMax(size_t d, const std::vector<float>& trained)
+            : Base(d, trained) {}
+
+    FAISS_ALWAYS_INLINE simd16float32
+    reconstruct_16_components(const uint8_t* code, int i) const {
+        const __m512 centroids = _mm512_loadu_ps(this->centroids);
+        const __m512i indices = unpack_16x4bit_to_u32(code, i);
+        return simd16float32(_mm512_permutexvar_ps(indices, centroids));
+    }
+
+    void decode_vector(const uint8_t* code, float* x) const final {
+        for (size_t i = 0; i < this->d; i += 16) {
+            simd16float32 xi =
+                    reconstruct_16_components(code, static_cast<int>(i));
+            _mm512_storeu_ps(x + i, xi.f);
+        }
+    }
+};
 
 // 8-bit Lloyd-Max AVX512
 template <>
