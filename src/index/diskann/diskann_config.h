@@ -43,6 +43,14 @@ class DiskANNConfig : public BaseConfig {
     // 1024 * 1024) / row_num)-dimensional uint8 vector. If pq_code_budget_gb is too large, it will be adjusted to the
     // size of dim*row_num.
     CFG_FLOAT pq_code_budget_gb;
+    // In-memory navigation codec. PQ preserves the existing DiskANN behavior;
+    // other codecs use an external sidecar and the common navigation distance
+    // interface.
+    CFG_STRING navigation_codec;
+    CFG_FLOAT navigation_code_budget_gb;
+    CFG_INT navigation_bits;
+    CFG_STRING navigation_rotation;
+    CFG_INT navigation_query_bits;
     // Limit on the memory allowed for building the index in GB. If you specify a value less than what is required to
     // build the index in one pass, the index is built using a divide and conquer approach so that sub-graphs will fit
     // in the RAM budget. The sub-graphs are overlayed to build the overall index. This approach can be up to 1.5 times
@@ -111,6 +119,36 @@ class DiskANNConfig : public BaseConfig {
             .set_default(0)
             .set_range(0, std::numeric_limits<CFG_FLOAT::value_type>::max())
             .for_train();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_codec)
+            .description("resident navigation codec: PQ or TQ_MSE")
+            .set_default("PQ")
+            .for_train()
+            .for_deserialize()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_code_budget_gb)
+            .description("optional memory budget for non-PQ resident navigation codes")
+            .set_default(0)
+            .set_range(0, std::numeric_limits<CFG_FLOAT::value_type>::max())
+            .for_train();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_bits)
+            .description("bits per component for codecs that expose a bit width")
+            .set_default(4)
+            .set_range(1, 16)
+            .for_train()
+            .for_deserialize()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_rotation)
+            .description("navigation transform: NONE or RR")
+            .set_default("RR")
+            .for_train()
+            .for_deserialize()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_query_bits)
+            .description("optional query quantization bits; 0 keeps query in fp32")
+            .set_default(0)
+            .set_range(0, 16)
+            .for_search()
+            .for_static();
         KNOWHERE_CONFIG_DECLARE_FIELD(build_dram_budget_gb)
             .description("limit on the memory allowed for building the index in GB.")
             .set_default(0)
@@ -183,6 +221,9 @@ class DiskANNConfig : public BaseConfig {
                 }
                 pq_code_budget_gb =
                     std::max(pq_code_budget_gb.value(), pq_code_budget_gb_ratio.value() * vec_field_size_gb.value());
+                if (navigation_codec.value_or("PQ") == "PQ") {
+                    pq_code_budget_gb = std::max(pq_code_budget_gb.value(), navigation_code_budget_gb.value_or(0));
+                }
                 search_cache_budget_gb = std::max(search_cache_budget_gb.value(),
                                                   search_cache_budget_gb_ratio.value() * vec_field_size_gb.value());
                 break;
@@ -199,6 +240,34 @@ class DiskANNConfig : public BaseConfig {
             }
             default:
                 break;
+        }
+        const auto codec = navigation_codec.value_or("PQ");
+        if (codec != "PQ" && codec != "TQ_MSE") {
+            return HandleError(err_msg, "navigation_codec currently supports PQ or TQ_MSE", Status::invalid_args);
+        }
+        if (codec == "TQ_MSE") {
+            if (metric_type.value_or(knowhere::metric::L2) != knowhere::metric::IP) {
+                return HandleError(err_msg, "TQ_MSE navigation currently requires IP", Status::invalid_metric_type);
+            }
+            const auto bits = navigation_bits.value_or(4);
+            if (bits < 2 || bits > 4) {
+                return HandleError(err_msg, "TQ_MSE navigation_bits must be in [2, 4]", Status::invalid_args);
+            }
+            if (navigation_rotation.value_or("RR") != "RR") {
+                return HandleError(err_msg, "TQ_MSE navigation currently requires navigation_rotation=RR",
+                                   Status::invalid_args);
+            }
+            if (navigation_query_bits.value_or(0) != 0) {
+                return HandleError(err_msg, "TQ_MSE navigation currently requires navigation_query_bits=0",
+                                   Status::invalid_args);
+            }
+            if (disk_pq_dims.value_or(0) != 0) {
+                return HandleError(err_msg, "TQ_MSE navigation currently requires disk_pq_dims=0",
+                                   Status::invalid_args);
+            }
+            if (warm_up.value_or(false)) {
+                return HandleError(err_msg, "TQ_MSE navigation does not support warm_up yet", Status::invalid_args);
+            }
         }
         return Status::success;
     }

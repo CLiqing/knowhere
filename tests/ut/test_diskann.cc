@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -38,6 +39,7 @@
 #include "filemanager/impl/LocalFileManager.h"
 #include "index/diskann/diskann_config.h"
 #include "index/diskann/rabitq_store.h"
+#include "index/diskann/tq_navigation_store.h"
 #include "knowhere/comp/brute_force.h"
 #include "knowhere/comp/knowhere_check.h"
 #include "knowhere/expected.h"
@@ -122,6 +124,134 @@ TEST_CASE("RaBitQ selected float sum SIMD matches scalar", "[diskann][rabitq][si
             REQUIRE(actual == Catch::Approx(expected).epsilon(1e-5));
         }
     }
+}
+
+TEST_CASE("DiskANN TQ navigation sidecar batch distance parity", "[diskann][tq_navigation]") {
+    constexpr uint32_t rows = 257;
+    constexpr uint32_t dim = 64;
+    const auto directory = fs::path(kDir) / "tq_navigation_store";
+    const auto data_path = (directory / "unit_ip.fbin").string();
+    const auto sidecar_path = (directory / "unit_ip_tqmse.index").string();
+    fs::remove_all(directory);
+    REQUIRE(fs::create_directories(directory));
+
+    auto dataset = GenDataSet(rows, dim, 31415);
+    auto* vectors = const_cast<float*>(static_cast<const float*>(dataset->GetTensor()));
+    for (uint32_t i = 0; i < rows; ++i) {
+        float norm = 0.0f;
+        for (uint32_t j = 0; j < dim; ++j) {
+            norm += vectors[static_cast<size_t>(i) * dim + j] * vectors[static_cast<size_t>(i) * dim + j];
+        }
+        norm = std::sqrt(norm);
+        for (uint32_t j = 0; j < dim; ++j) {
+            vectors[static_cast<size_t>(i) * dim + j] /= norm;
+        }
+    }
+    WriteRawDataToDisk<float>(data_path, vectors, rows, dim);
+
+    REQUIRE_NOTHROW(knowhere::TQNavigationStore::BuildFromFloatBin(data_path, sidecar_path, 4));
+    knowhere::TQNavigationStore store(sidecar_path);
+    REQUIRE(store.Count() == rows);
+    REQUIRE(store.Dimension() == dim);
+    REQUIRE(store.Bits() == 4);
+    REQUIRE(store.CodeSize() == dim / 2);
+
+    auto candidate = store.CreateDistanceComputer();
+    auto reference = store.CreateDistanceComputer();
+    candidate->set_query(vectors);
+    reference->set_query(vectors);
+    const std::array<unsigned, 7> ids = {0, 1, 2, 17, 63, 128, 256};
+    std::array<float, ids.size()> actual{};
+    candidate->compute_distances(ids.data(), ids.size(), actual.data(), 0.0f, false, nullptr);
+
+    for (size_t i = 0; i < ids.size(); ++i) {
+        float expected = 0.0f;
+        reference->compute_distances(&ids[i], 1, &expected, 0.0f, false, nullptr);
+        REQUIRE(actual[i] == Catch::Approx(expected).margin(1e-5f));
+    }
+
+    fs::remove_all(directory);
+}
+
+TEST_CASE("DiskANN TQ navigation build deserialize and search", "[diskann][tq_navigation][integration]") {
+    constexpr uint32_t rows = 1000;
+    constexpr uint32_t dim = 128;
+    constexpr uint32_t queries = 10;
+    constexpr uint32_t topk = 10;
+    const char* test_root = std::getenv("KNOWHERE_DISKANN_TEST_DIR");
+    const auto directory = fs::path(test_root == nullptr ? kDir : test_root) / "tq_navigation_integration";
+    const auto data_path = (directory / "base.fbin").string();
+    const auto index_prefix = (directory / "index" / "ip").string();
+    fs::remove_all(directory);
+    REQUIRE(fs::create_directories(fs::path(index_prefix).parent_path()));
+
+    auto base = GenDataSet(rows, dim, 27182);
+    auto query = GenDataSet(queries, dim, 81828);
+    WriteRawDataToDisk<float>(data_path, static_cast<const float*>(base->GetTensor()), rows, dim);
+
+    knowhere::Json build_json = {{"dim", dim},
+                                 {"metric_type", knowhere::metric::IP},
+                                 {"index_prefix", index_prefix},
+                                 {"data_path", data_path},
+                                 {"max_degree", 32},
+                                 {"search_list_size", 128},
+                                 {"pq_code_budget_gb", 0.001},
+                                 {"build_dram_budget_gb", 1.0},
+                                 {"disk_pq_dims", 0},
+                                 {"search_cache_budget_gb", 0},
+                                 {"search_cache_budget_gb_ratio", 0},
+                                 {"navigation_codec", "TQ_MSE"},
+                                 {"navigation_bits", 4},
+                                 {"navigation_rotation", "RR"}};
+    knowhere::Json deserialize_json = {{"dim", dim},
+                                       {"metric_type", knowhere::metric::IP},
+                                       {"index_prefix", index_prefix},
+                                       {"search_cache_budget_gb", 0},
+                                       {"search_cache_budget_gb_ratio", 0},
+                                       {"use_bfs_cache", true},
+                                       {"warm_up", false},
+                                       {"navigation_codec", "TQ_MSE"},
+                                       {"navigation_bits", 4},
+                                       {"navigation_rotation", "RR"}};
+    knowhere::Json search_json = {{"dim", dim},
+                                  {"metric_type", knowhere::metric::IP},
+                                  {"k", topk},
+                                  {"search_list_size", 128},
+                                  {"beamwidth", 8},
+                                  {"navigation_query_bits", 0}};
+
+    auto file_manager = std::make_shared<milvus::LocalFileManager>();
+    auto pack = knowhere::Pack(std::shared_ptr<milvus::FileManager>(file_manager));
+    auto version = GenTestVersionList();
+    knowhere::BinarySet binset;
+    {
+        auto index = knowhere::IndexFactory::Instance()
+                         .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN, version, pack)
+                         .value();
+        REQUIRE(index.Build(nullptr, build_json) == knowhere::Status::success);
+        REQUIRE(fs::exists(knowhere::TQNavigationStore::SidecarFilename(index_prefix)));
+        REQUIRE_FALSE(fs::exists(index_prefix + "_prepped_base.bin"));
+        REQUIRE(index.Serialize(binset) == knowhere::Status::success);
+    }
+
+    auto index = knowhere::IndexFactory::Instance()
+                     .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN, version, pack)
+                     .value();
+    REQUIRE(index.Deserialize(binset, deserialize_json) == knowhere::Status::success);
+    auto result = index.Search(query, search_json, nullptr);
+    REQUIRE(result.has_value());
+    auto ground_truth = knowhere::BruteForce::Search<knowhere::fp32>(base, query, search_json, nullptr);
+    REQUIRE(ground_truth.has_value());
+    REQUIRE(GetKNNRecall(*ground_truth.value(), *result.value()) > 0.7f);
+
+    auto invalid_l2 = build_json;
+    invalid_l2["metric_type"] = knowhere::metric::L2;
+    auto invalid_index = knowhere::IndexFactory::Instance()
+                             .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_DISKANN, version, pack)
+                             .value();
+    REQUIRE(invalid_index.Build(nullptr, invalid_l2) == knowhere::Status::invalid_metric_type);
+
+    fs::remove_all(directory);
 }
 
 TEST_CASE("Valid diskann build params test", "[diskann]") {
