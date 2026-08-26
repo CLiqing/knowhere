@@ -553,6 +553,14 @@ struct QuantizerTurboQuantFull<NBits, SIMDLevel::NONE>
                &di);
     }
 
+    /// Scale the structured QJL projection to the same per-entry variance as
+    /// the paper's iid N(0, 1) matrix.  The unnormalized FWHT already has
+    /// entries in {-1, +1}; an orthogonal RR matrix has unit-norm rows and
+    /// therefore needs a sqrt(d) scale.
+    float qjl_projection_scale() const {
+        return qjl_type == 0 ? 1.0f : std::sqrt(static_cast<float>(d));
+    }
+
     /// Store MSE index for dimension j using BIT-PLANE layout.
     /// Plane p stores bit p of every dimension's index.
     void store_mse_index(uint8_t idx, uint8_t* code, size_t j) const {
@@ -619,7 +627,7 @@ struct QuantizerTurboQuantFull<NBits, SIMDLevel::NONE>
 
     void decode_vector(const uint8_t* code, float* x) const final {
         float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
-        float inv_sqrt_pd = 1.0f / std::sqrt(static_cast<float>(padded_d));
+        const float qjl_scale = qjl_projection_scale();
 
         const auto* factors = reinterpret_cast<const SQTurboQFactors*>(
                 code + mse_total_bytes + qjl_plane_bytes);
@@ -638,8 +646,8 @@ struct QuantizerTurboQuantFull<NBits, SIMDLevel::NONE>
         std::vector<float> signs_buf(padded_d);
         for (size_t j = 0; j < d; j++) {
             signs_buf[j] = rabitq_utils::extract_bit_standard(qjl_code, j)
-                    ? inv_sqrt_pd
-                    : -inv_sqrt_pd;
+                    ? qjl_scale
+                    : -qjl_scale;
         }
         for (size_t j = d; j < padded_d; j++) {
             signs_buf[j] = 0.0f;

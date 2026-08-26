@@ -136,10 +136,9 @@ struct DCTurboQuantFull : ScalarQuantizer::TurboQuantRefine::DistanceComputer {
         // Project query
         query_proj.resize(d);
         quant.project_forward(x, query_proj.data());
-        float inv_sqrt_pd =
-                1.0f / std::sqrt(static_cast<float>(quant.padded_d));
+        const float qjl_scale = quant.qjl_projection_scale();
         for (size_t j = 0; j < d; j++) {
-            query_proj[j] *= inv_sqrt_pd;
+            query_proj[j] *= qjl_scale;
         }
 
         total_qproj_sum = 0;

@@ -670,6 +670,66 @@ TEST(ScalarQuantizer, FullTQSymmetricDistanceMatchesDecodedReference) {
     }
 }
 
+void check_full_tq_qjl_residual_scale(uint8_t qjl_type) {
+    constexpr size_t d = 64;
+    constexpr size_t n = 2048;
+    std::vector<float> x = make_normalized_vectors(n, d);
+
+    faiss::ScalarQuantizer mse_sq(
+            d, faiss::ScalarQuantizer::QT_3bit_tqmse);
+    mse_sq.train(n, x.data());
+    std::vector<uint8_t> mse_codes(mse_sq.code_size * n, 0);
+    mse_sq.compute_codes(x.data(), mse_codes.data(), n);
+    std::vector<float> mse_decoded(n * d);
+    mse_sq.decode(mse_codes.data(), mse_decoded.data(), n);
+
+    faiss::ScalarQuantizer full_sq(d, faiss::ScalarQuantizer::QT_4bit_tq);
+    full_sq.turboq_refine.qjl_type = qjl_type;
+    full_sq.train(n, x.data());
+    std::vector<uint8_t> full_codes(full_sq.code_size * n, 0);
+    full_sq.compute_codes(x.data(), full_codes.data(), n);
+    std::vector<float> full_decoded(n * d);
+    full_sq.decode(full_codes.data(), full_decoded.data(), n);
+
+    double expected_residual_ip = 0.0;
+    double estimated_residual_ip = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const float* query = x.data() + i * d;
+        const float* mse = mse_decoded.data() + i * d;
+        const float* full = full_decoded.data() + i * d;
+        for (size_t j = 0; j < d; ++j) {
+            expected_residual_ip += query[j] * (query[j] - mse[j]);
+            estimated_residual_ip += query[j] * (full[j] - mse[j]);
+        }
+    }
+
+    ASSERT_GT(expected_residual_ip, 0.0);
+    EXPECT_NEAR(
+            estimated_residual_ip / expected_residual_ip,
+            1.0,
+            0.1);
+
+    std::unique_ptr<faiss::ScalarQuantizer::SQDistanceComputer> dc(
+            full_sq.get_distance_computer(faiss::METRIC_INNER_PRODUCT));
+    ASSERT_NE(dc, nullptr);
+    for (size_t i = 0; i < 8; ++i) {
+        const float* query = x.data() + i * d;
+        const uint8_t* code = full_codes.data() + i * full_sq.code_size;
+        const float* decoded = full_decoded.data() + i * d;
+        dc->set_query(query);
+        float decoded_ip = 0.0f;
+        for (size_t j = 0; j < d; ++j) {
+            decoded_ip += query[j] * decoded[j];
+        }
+        EXPECT_NEAR(dc->query_to_code(code), decoded_ip, 1e-5f);
+    }
+}
+
+TEST(ScalarQuantizer, FullTQQJLResidualScale) {
+    check_full_tq_qjl_residual_scale(0); // FWHT
+    check_full_tq_qjl_residual_scale(2); // random rotation
+}
+
 TEST(ScalarQuantizer, TQMSEAccuracyOrdering) {
     const size_t d = 32;
     const size_t n = 256;
