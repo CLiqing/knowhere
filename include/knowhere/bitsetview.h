@@ -79,6 +79,9 @@ class BitsetView {
 
     struct ExtraScalarInt64PredicateFilter {
         using ScalarRowIdMapper = int64_t (*)(const void*, int64_t);
+        using CandidateEvaluatorBatch = int32_t (*)(
+            const void*, const int64_t*, uint32_t, uint64_t, uint64_t*, uint64_t*
+        ) noexcept;
 
         ExtraScalarPredicateValueType value_type = ExtraScalarPredicateValueType::kInt64;
         const int64_t* row_values = nullptr;
@@ -117,6 +120,14 @@ class BitsetView {
         // order without gathering an O(N) copy for every search.
         const void* scalar_row_id_mapper_context = nullptr;
         ScalarRowIdMapper scalar_row_id_mapper = nullptr;
+        // Optional query-scoped evaluator supplied by the Milvus execution
+        // layer.  Cardinal owns graph traversal and batching; the callback
+        // owns predicate semantics.  ABI major 1 uses logical int64 row IDs
+        // and at most 64 lanes represented by masks.
+        uint32_t candidate_evaluator_abi_major = 0;
+        uint64_t candidate_evaluator_feature_bits = 0;
+        const void* candidate_evaluator_context = nullptr;
+        CandidateEvaluatorBatch candidate_evaluator_batch = nullptr;
     };
 
     BitsetView() = default;
