@@ -195,6 +195,43 @@ class FaissHnswPqConfig : public FaissHnswConfig {
     }
 };
 
+class FaissHnswRaBitQConfig : public FaissHnswConfig {
+ public:
+    // Number of bits per database vector dimension.
+    CFG_INT rbq_bits;
+
+    KNOWHERE_DECLARE_CONFIG(FaissHnswRaBitQConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits)
+            .description("number of RaBitQ bits per database vector dimension")
+            .set_default(1)
+            .set_range(1, 9)
+            .for_train()
+            .for_static();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto base_status = FaissHnswConfig::CheckAndAdjust(param_type, err_msg);
+        if (base_status != Status::success) {
+            return base_status;
+        }
+
+        const auto metric = str_to_lower(metric_type.value_or(knowhere::metric::L2));
+        if (metric != "l2" && metric != "ip") {
+            return HandleError(err_msg, "HNSW_RABITQ only supports L2 and IP metrics", Status::invalid_metric_type);
+        }
+
+        if (param_type == PARAM_TYPE::TRAIN && refine_type.has_value() &&
+            !WhetherAcceptableRefineType(refine_type.value())) {
+            return HandleError(err_msg,
+                               "invalid refine type : " + refine_type.value() +
+                                   ", optional types are [sq4u, sq6, sq8, fp16, bf16, fp32, flat]",
+                               Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
+
 class FaissHnswPrqConfig : public FaissHnswConfig {
  public:
     // number of subquantizer splits

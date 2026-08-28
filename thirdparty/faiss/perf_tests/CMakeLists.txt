@@ -31,6 +31,10 @@ include(../cmake/link_to_faiss_lib.cmake)
 
 link_to_faiss_lib(faiss_perf_tests_utils)
 
+add_executable(bench_rabitq_simd ../benchs/bench_rabitq_simd.cpp)
+link_to_faiss_lib(bench_rabitq_simd)
+target_link_libraries(bench_rabitq_simd PRIVATE benchmark::benchmark)
+
 set(FAISS_PERF_TEST_SRC
   bench_no_multithreading_rcq_search.cpp
   bench_scalar_quantizer_accuracy.cpp
