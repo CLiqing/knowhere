@@ -19,6 +19,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -77,11 +78,32 @@ class BitsetView {
     static_assert(std::is_trivially_copyable_v<CompiledLikePatternView>);
     static_assert(std::is_standard_layout_v<CompiledLikePatternView>);
 
+    static constexpr uint32_t kCandidateEvaluatorAbiMajor = 1;
+
+    struct CandidateEvaluatorV1 {
+        using EvalBatch = int32_t (*)(
+            const void*, const int64_t*, uint32_t, uint64_t, uint64_t*
+        ) noexcept;
+        using EvalContiguous = int32_t (*)(
+            const void*, int64_t, uint32_t, uint64_t, uint64_t*
+        ) noexcept;
+        using RowIdMapper = int64_t (*)(const void*, int64_t) noexcept;
+
+        uint32_t abi_major = 0;
+        uint32_t struct_size = 0;
+        uint64_t abi_capabilities = 0;
+        const void* context = nullptr;
+        EvalBatch eval_batch = nullptr;
+        EvalContiguous eval_contiguous = nullptr;
+        const void* row_id_mapper_context = nullptr;
+        RowIdMapper row_id_mapper = nullptr;
+    };
+
+    static_assert(std::is_trivially_copyable_v<CandidateEvaluatorV1>);
+    static_assert(std::is_standard_layout_v<CandidateEvaluatorV1>);
+
     struct ExtraScalarInt64PredicateFilter {
         using ScalarRowIdMapper = int64_t (*)(const void*, int64_t);
-        using CandidateEvaluatorBatch = int32_t (*)(
-            const void*, const int64_t*, uint32_t, uint64_t, uint64_t*, uint64_t*
-        ) noexcept;
 
         ExtraScalarPredicateValueType value_type = ExtraScalarPredicateValueType::kInt64;
         const int64_t* row_values = nullptr;
@@ -120,14 +142,6 @@ class BitsetView {
         // order without gathering an O(N) copy for every search.
         const void* scalar_row_id_mapper_context = nullptr;
         ScalarRowIdMapper scalar_row_id_mapper = nullptr;
-        // Optional query-scoped evaluator supplied by the Milvus execution
-        // layer.  Cardinal owns graph traversal and batching; the callback
-        // owns predicate semantics.  ABI major 1 uses logical int64 row IDs
-        // and at most 64 lanes represented by masks.
-        uint32_t candidate_evaluator_abi_major = 0;
-        uint64_t candidate_evaluator_feature_bits = 0;
-        const void* candidate_evaluator_context = nullptr;
-        CandidateEvaluatorBatch candidate_evaluator_batch = nullptr;
     };
 
     BitsetView() = default;
@@ -165,7 +179,7 @@ class BitsetView {
 
     size_t
     estimated_count() const {
-        if (!has_extra_scalar_int64_predicate_filter_) {
+        if (!has_deferred_filter_()) {
             return count();
         }
         return std::min(size(), std::max(count(), extra_filtered_out_count_));
@@ -176,7 +190,7 @@ class BitsetView {
         if (count() != 0) {
             return count();
         }
-        if (bits_ == nullptr && has_extra_scalar_int64_predicate_filter_) {
+        if (has_deferred_filter_()) {
             return estimated_count();
         }
         return get_filtered_out_num_();
@@ -239,6 +253,32 @@ class BitsetView {
         }
     }
 
+    void
+    set_candidate_evaluator(const CandidateEvaluatorV1& evaluator, size_t row_count,
+                            size_t estimated_filtered_out_count) {
+        if (evaluator.abi_major != kCandidateEvaluatorAbiMajor ||
+            evaluator.struct_size < sizeof(CandidateEvaluatorV1) ||
+            evaluator.context == nullptr || evaluator.eval_batch == nullptr) {
+            throw std::invalid_argument("candidate evaluator ABI is incomplete or incompatible");
+        }
+        candidate_evaluator_ = evaluator;
+        has_candidate_evaluator_ = true;
+        extra_filtered_out_count_ = estimated_filtered_out_count;
+        if (bits_ == nullptr && num_bits_ == 0) {
+            num_bits_ = row_count;
+        }
+    }
+
+    bool
+    has_candidate_evaluator() const {
+        return has_candidate_evaluator_;
+    }
+
+    const CandidateEvaluatorV1&
+    candidate_evaluator() const {
+        return candidate_evaluator_;
+    }
+
     bool
     has_extra_scalar_int64_predicate_filter() const {
         return has_extra_scalar_int64_predicate_filter_;
@@ -257,6 +297,14 @@ class BitsetView {
         }
     }
 
+    void
+    copy_candidate_evaluator_from(const BitsetView& other) {
+        if (other.has_candidate_evaluator_) {
+            set_candidate_evaluator(other.candidate_evaluator_, other.size(),
+                                    other.extra_filtered_out_count_);
+        }
+    }
+
     size_t
     extra_filtered_out_count() const {
         return extra_filtered_out_count_;
@@ -272,7 +320,9 @@ class BitsetView {
         // when index is larger than the max_offset, ignore it
         bool filtered = (out_id >= static_cast<int64_t>(num_bits_)) ||
                         (bits_ != nullptr && (bits_[out_id >> 3] & (0x1 << (out_id & 0x7))));
-        if (!filtered && has_extra_scalar_int64_predicate_filter_) {
+        if (!filtered && has_candidate_evaluator_) {
+            filtered = test_candidate_evaluator_(out_id);
+        } else if (!filtered && has_extra_scalar_int64_predicate_filter_) {
             filtered = test_extra_scalar_int64_predicate_filter_(out_id);
         }
         return filtered;
@@ -338,7 +388,7 @@ class BitsetView {
     // return the first valid idx. if with id mapping, return the first valid internal_id.
     size_t
     get_first_valid_index() const {
-        if (has_extra_scalar_int64_predicate_filter_) {
+        if (has_deferred_filter_()) {
             for (size_t i = 0; i < size(); i++) {
                 if (!test(i)) {
                     return i;
@@ -416,8 +466,36 @@ class BitsetView {
     size_t num_filtered_out_ids_ = 0;
 
     size_t extra_filtered_out_count_ = 0;
+    CandidateEvaluatorV1 candidate_evaluator_;
+    bool has_candidate_evaluator_ = false;
     ExtraScalarInt64PredicateFilter extra_scalar_int64_predicate_filter_;
     bool has_extra_scalar_int64_predicate_filter_ = false;
+
+    bool
+    has_deferred_filter_() const {
+        return has_extra_scalar_int64_predicate_filter_ || has_candidate_evaluator_;
+    }
+
+    bool
+    test_candidate_evaluator_(int64_t out_id) const {
+        int64_t candidate_id = out_id;
+        if (candidate_evaluator_.row_id_mapper != nullptr) {
+            candidate_id = candidate_evaluator_.row_id_mapper(
+                candidate_evaluator_.row_id_mapper_context, out_id);
+        }
+        if (candidate_id < 0) {
+            return true;
+        }
+        uint64_t valid_mask = 0;
+        const auto status = candidate_evaluator_.eval_batch(
+            candidate_evaluator_.context, &candidate_id, 1, uint64_t{1},
+            &valid_mask);
+        if (status != 0 || (valid_mask & ~uint64_t{1}) != 0) {
+            throw std::runtime_error(
+                "candidate evaluator violated its execution contract");
+        }
+        return (valid_mask & uint64_t{1}) == 0;
+    }
 
     bool
     test_extra_scalar_int64_predicate_filter_(int64_t out_id) const {

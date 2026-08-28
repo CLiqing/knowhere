@@ -45,6 +45,33 @@ MakeView(const knowhere::BitsetView::ExtraScalarInt64PredicateFilter& filter) {
     return view;
 }
 
+int32_t
+EvaluateSelectedRows(const void* context,
+                     const int64_t* row_ids,
+                     uint32_t count,
+                     uint64_t active_mask,
+                     uint64_t* valid_mask) noexcept {
+    if (context == nullptr || row_ids == nullptr || valid_mask == nullptr ||
+        count > 64) {
+        return -1;
+    }
+    const auto* selected = static_cast<const std::array<bool, 4>*>(context);
+    uint64_t result = 0;
+    for (uint32_t lane = 0; lane < count; ++lane) {
+        const auto lane_bit = uint64_t{1} << lane;
+        if ((active_mask & lane_bit) == 0) {
+            continue;
+        }
+        const auto row_id = row_ids[lane];
+        if (row_id >= 0 && static_cast<size_t>(row_id) < selected->size() &&
+            (*selected)[row_id]) {
+            result |= lane_bit;
+        }
+    }
+    *valid_mask = result;
+    return 0;
+}
+
 }  // namespace
 
 TEST_CASE("BitsetView reads nullable varchar from irregular raw chunks") {
@@ -261,4 +288,25 @@ TEST_CASE("BitsetView maps physical vector rows to logical scalar rows lazily") 
     CHECK_FALSE(view.test(0));
     CHECK(view.test(1));
     CHECK_FALSE(view.test(2));
+}
+
+TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
+    static constexpr std::array<bool, 4> selected = {false, true, false, true};
+    static constexpr std::array<uint8_t, 1> mandatory_bits = {0b00000010};
+
+    knowhere::BitsetView::CandidateEvaluatorV1 evaluator;
+    evaluator.abi_major = knowhere::BitsetView::kCandidateEvaluatorAbiMajor;
+    evaluator.struct_size = sizeof(evaluator);
+    evaluator.context = &selected;
+    evaluator.eval_batch = &EvaluateSelectedRows;
+
+    knowhere::BitsetView view(mandatory_bits.data(), selected.size());
+    view.set_candidate_evaluator(evaluator, selected.size(), 2);
+
+    CHECK(view.has_candidate_evaluator());
+    CHECK(view.estimated_count() == 2);
+    CHECK(view.test(0));
+    CHECK(view.test(1));
+    CHECK(view.test(2));
+    CHECK_FALSE(view.test(3));
 }

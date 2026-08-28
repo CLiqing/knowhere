@@ -157,6 +157,7 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
             auto filtered_out_num = bitset_.filtered_out_count_for_index_search();
             bitset = BitsetView(bitset_.data(), bitset_.size(), filtered_out_num);
             bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
+            bitset.copy_candidate_evaluator_from(bitset_);
         } else {
             // if bitset has filtered out num, use it
             bitset = bitset_;
@@ -227,6 +228,7 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
         auto bitset = BitsetView(bitset_.data(), bitset_.size(),
                                  bitset_.filtered_out_count_for_index_search());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
+        bitset.copy_candidate_evaluator_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         // note that this time includes only the initial search phase of iterator.
@@ -269,6 +271,7 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
         auto bitset = BitsetView(bitset_.data(), bitset_.size(),
                                  bitset_.filtered_out_count_for_index_search());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
+        bitset.copy_candidate_evaluator_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         const BaseConfig& b_cfg = static_cast<const BaseConfig&>(*cfg);
