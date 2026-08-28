@@ -196,6 +196,33 @@ class BitsetView {
         return get_filtered_out_num_();
     }
 
+    // Return the exact number of rows filtered by the materialized bitmap
+    // only.  Deferred predicates are deliberately excluded: their sampled
+    // count is suitable for routing, but not for sizing result buffers.
+    size_t
+    base_filtered_out_count() const {
+        if (count() != 0) {
+            return count();
+        }
+        if (bits_ == nullptr) {
+            return 0;
+        }
+        if (out_ids_ != nullptr) {
+            size_t filtered = 0;
+            for (size_t internal_id = 0; internal_id < num_internal_ids_;
+                 ++internal_id) {
+                const auto out_id = out_ids_[internal_id] + id_offset_;
+                filtered +=
+                    out_id >= num_bits_ ||
+                    (bits_[out_id >> 3] & (uint8_t{1} << (out_id & 0x7)));
+            }
+            return filtered;
+        }
+        // With a backing bitmap and no ID mapping, get_filtered_out_num_()
+        // takes its popcount fast path and never invokes a deferred evaluator.
+        return get_filtered_out_num_();
+    }
+
     size_t
     byte_size() const {
         return (num_bits_ + 8 - 1) >> 3;

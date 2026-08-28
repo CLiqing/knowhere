@@ -154,8 +154,13 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
             // A scalar-only downpush filter has no backing bitmap.  Its
             // sampled estimate is sufficient for path selection; traversing
             // every row here would turn Graph search back into O(N).
-            auto filtered_out_num = bitset_.filtered_out_count_for_index_search();
-            bitset = BitsetView(bitset_.data(), bitset_.size(), filtered_out_num);
+            // A deferred predicate estimate is a routing hint, not an exact
+            // base-bitmap count.  Keep the exact count at zero and copy the
+            // estimate with the evaluator below; otherwise consumers may use
+            // the estimate to size correctness-critical result buffers.
+            bitset = BitsetView(bitset_.data(),
+                                bitset_.size(),
+                                bitset_.base_filtered_out_count());
             bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
             bitset.copy_candidate_evaluator_from(bitset_);
         } else {
@@ -225,8 +230,9 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = BitsetView(bitset_.data(), bitset_.size(),
-                                 bitset_.filtered_out_count_for_index_search());
+        auto bitset = BitsetView(bitset_.data(),
+                                 bitset_.size(),
+                                 bitset_.base_filtered_out_count());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
         bitset.copy_candidate_evaluator_from(bitset_);
 
@@ -268,8 +274,9 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
             return expected<DataSetPtr>::Err(Status::invalid_args, msg);
         }
 
-        auto bitset = BitsetView(bitset_.data(), bitset_.size(),
-                                 bitset_.filtered_out_count_for_index_search());
+        auto bitset = BitsetView(bitset_.data(),
+                                 bitset_.size(),
+                                 bitset_.base_filtered_out_count());
         bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
         bitset.copy_candidate_evaluator_from(bitset_);
 

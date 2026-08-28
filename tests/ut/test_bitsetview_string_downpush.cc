@@ -304,9 +304,25 @@ TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
     view.set_candidate_evaluator(evaluator, selected.size(), 2);
 
     CHECK(view.has_candidate_evaluator());
+    CHECK(view.base_filtered_out_count() == 1);
     CHECK(view.estimated_count() == 2);
     CHECK(view.test(0));
     CHECK(view.test(1));
     CHECK(view.test(2));
     CHECK_FALSE(view.test(3));
+
+    SECTION("a wrapper keeps estimated and exact filtered counts separate") {
+        knowhere::BitsetView deferred;
+        deferred.set_candidate_evaluator(evaluator, selected.size(), 3);
+        REQUIRE(deferred.count() == 0);
+        REQUIRE(deferred.base_filtered_out_count() == 0);
+        REQUIRE(deferred.estimated_count() == 3);
+
+        knowhere::BitsetView wrapped(
+            deferred.data(), deferred.size(), deferred.count());
+        wrapped.copy_candidate_evaluator_from(deferred);
+        CHECK(wrapped.count() == 0);
+        CHECK(wrapped.base_filtered_out_count() == 0);
+        CHECK(wrapped.estimated_count() == 3);
+    }
 }
