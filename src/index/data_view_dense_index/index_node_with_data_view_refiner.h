@@ -499,9 +499,7 @@ IndexNodeWithDataViewRefiner<DataType, BaseIndexNode>::Search(const DataSetPtr d
         if (!internal_offset_to_most_external_id_.empty()) {
             size_t num_filtered_out_ids = 0;
             if (!bitset.empty()) {
-                if (bitset.data() == nullptr &&
-                    (bitset.has_extra_scalar_int64_predicate_filter() ||
-                     bitset.has_candidate_evaluator())) {
+                if (bitset.data() == nullptr && bitset.has_candidate_evaluator()) {
                     // A scalar-only downpush filter deliberately has no base
                     // bitmap.  Scanning every row here merely to derive an
                     // exact path-selection count turns each Graph request

@@ -161,7 +161,6 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
             bitset = BitsetView(bitset_.data(),
                                 bitset_.size(),
                                 bitset_.base_filtered_out_count());
-            bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
             bitset.copy_candidate_evaluator_from(bitset_);
         } else {
             // if bitset has filtered out num, use it
@@ -233,7 +232,6 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
         auto bitset = BitsetView(bitset_.data(),
                                  bitset_.size(),
                                  bitset_.base_filtered_out_count());
-        bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
         bitset.copy_candidate_evaluator_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -277,7 +275,6 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
         auto bitset = BitsetView(bitset_.data(),
                                  bitset_.size(),
                                  bitset_.base_filtered_out_count());
-        bitset.copy_extra_scalar_int64_predicate_filter_from(bitset_);
         bitset.copy_candidate_evaluator_from(bitset_);
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
