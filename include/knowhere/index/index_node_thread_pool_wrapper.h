@@ -12,12 +12,13 @@
 #ifndef INDEX_NODE_THREAD_POOL_WRAPPER_H
 #define INDEX_NODE_THREAD_POOL_WRAPPER_H
 
+#include "knowhere/ann_filter_planner.h"
 #include "knowhere/index/index_node.h"
 
 namespace knowhere {
 
 class ThreadPool;
-class IndexNodeThreadPoolWrapper : public IndexNode {
+class IndexNodeThreadPoolWrapper : public IndexNode, public AnnFilterPlanner {
  public:
     IndexNodeThreadPoolWrapper(std::unique_ptr<IndexNode> index_node, size_t pool_size);
 
@@ -94,6 +95,13 @@ class IndexNodeThreadPoolWrapper : public IndexNode {
     std::string
     Type() const override {
         return index_node_->Type();
+    }
+
+    AnnFilterPlanResultV1
+    PlanAnnFilter(const AnnFilterPlanRequestV1& request) const noexcept override {
+        const auto* planner = dynamic_cast<const AnnFilterPlanner*>(index_node_.get());
+        return planner == nullptr ? AnnFilterPlanResultV1{}
+                                  : planner->PlanAnnFilter(request);
     }
 
  private:
