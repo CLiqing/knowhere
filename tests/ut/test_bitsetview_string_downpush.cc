@@ -46,13 +46,9 @@ MakeView(const knowhere::BitsetView::ExtraScalarInt64PredicateFilter& filter) {
 }
 
 int32_t
-EvaluateSelectedRows(const void* context,
-                     const int64_t* row_ids,
-                     uint32_t count,
-                     uint64_t active_mask,
+EvaluateSelectedRows(const void* context, const int64_t* row_ids, uint32_t count, uint64_t active_mask,
                      uint64_t* valid_mask) noexcept {
-    if (context == nullptr || row_ids == nullptr || valid_mask == nullptr ||
-        count > 64) {
+    if (context == nullptr || row_ids == nullptr || valid_mask == nullptr || count > 64) {
         return -1;
     }
     const auto* selected = static_cast<const std::array<bool, 4>*>(context);
@@ -63,8 +59,7 @@ EvaluateSelectedRows(const void* context,
             continue;
         }
         const auto row_id = row_ids[lane];
-        if (row_id >= 0 && static_cast<size_t>(row_id) < selected->size() &&
-            (*selected)[row_id]) {
+        if (row_id >= 0 && static_cast<size_t>(row_id) < selected->size() && (*selected)[row_id]) {
             result |= lane_bit;
         }
     }
@@ -299,6 +294,10 @@ TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
     evaluator.struct_size = sizeof(evaluator);
     evaluator.context = &selected;
     evaluator.eval_batch = &EvaluateSelectedRows;
+    evaluator.abi_capabilities = knowhere::BitsetView::kCandidateEvaluatorCapabilityLease;
+    evaluator.lease_factory_context = &selected;
+    evaluator.acquire_lease = [](const void* context) noexcept -> void* { return const_cast<void*>(context); };
+    evaluator.release_lease = [](void*) noexcept {};
 
     knowhere::BitsetView view(mandatory_bits.data(), selected.size());
     view.set_candidate_evaluator(evaluator, selected.size(), 2);
@@ -311,6 +310,13 @@ TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
     CHECK(view.test(2));
     CHECK_FALSE(view.test(3));
 
+    SECTION("a declared lease must provide a complete acquire/release pair") {
+        auto incomplete = evaluator;
+        incomplete.release_lease = nullptr;
+        knowhere::BitsetView rejected;
+        CHECK_THROWS_AS(rejected.set_candidate_evaluator(incomplete, selected.size(), 2), std::invalid_argument);
+    }
+
     SECTION("a wrapper keeps estimated and exact filtered counts separate") {
         knowhere::BitsetView deferred;
         deferred.set_candidate_evaluator(evaluator, selected.size(), 3);
@@ -318,8 +324,7 @@ TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
         REQUIRE(deferred.base_filtered_out_count() == 0);
         REQUIRE(deferred.estimated_count() == 3);
 
-        knowhere::BitsetView wrapped(
-            deferred.data(), deferred.size(), deferred.count());
+        knowhere::BitsetView wrapped(deferred.data(), deferred.size(), deferred.count());
         wrapped.copy_candidate_evaluator_from(deferred);
         CHECK(wrapped.count() == 0);
         CHECK(wrapped.base_filtered_out_count() == 0);

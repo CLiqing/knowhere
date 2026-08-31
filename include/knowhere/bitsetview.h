@@ -79,15 +79,14 @@ class BitsetView {
     static_assert(std::is_standard_layout_v<CompiledLikePatternView>);
 
     static constexpr uint32_t kCandidateEvaluatorAbiMajor = 1;
+    static constexpr uint64_t kCandidateEvaluatorCapabilityLease = 1ULL << 0;
 
     struct CandidateEvaluatorV1 {
-        using EvalBatch = int32_t (*)(
-            const void*, const int64_t*, uint32_t, uint64_t, uint64_t*
-        ) noexcept;
-        using EvalContiguous = int32_t (*)(
-            const void*, int64_t, uint32_t, uint64_t, uint64_t*
-        ) noexcept;
+        using EvalBatch = int32_t (*)(const void*, const int64_t*, uint32_t, uint64_t, uint64_t*) noexcept;
+        using EvalContiguous = int32_t (*)(const void*, int64_t, uint32_t, uint64_t, uint64_t*) noexcept;
         using RowIdMapper = int64_t (*)(const void*, int64_t) noexcept;
+        using AcquireLease = void* (*)(const void*) noexcept;
+        using ReleaseLease = void (*)(void*) noexcept;
 
         uint32_t abi_major = 0;
         uint32_t struct_size = 0;
@@ -97,6 +96,9 @@ class BitsetView {
         EvalContiguous eval_contiguous = nullptr;
         const void* row_id_mapper_context = nullptr;
         RowIdMapper row_id_mapper = nullptr;
+        const void* lease_factory_context = nullptr;
+        AcquireLease acquire_lease = nullptr;
+        ReleaseLease release_lease = nullptr;
     };
 
     static_assert(std::is_trivially_copyable_v<CandidateEvaluatorV1>);
@@ -209,12 +211,9 @@ class BitsetView {
         }
         if (out_ids_ != nullptr) {
             size_t filtered = 0;
-            for (size_t internal_id = 0; internal_id < num_internal_ids_;
-                 ++internal_id) {
+            for (size_t internal_id = 0; internal_id < num_internal_ids_; ++internal_id) {
                 const auto out_id = out_ids_[internal_id] + id_offset_;
-                filtered +=
-                    out_id >= num_bits_ ||
-                    (bits_[out_id >> 3] & (uint8_t{1} << (out_id & 0x7)));
+                filtered += out_id >= num_bits_ || (bits_[out_id >> 3] & (uint8_t{1} << (out_id & 0x7)));
             }
             return filtered;
         }
@@ -284,9 +283,14 @@ class BitsetView {
     set_candidate_evaluator(const CandidateEvaluatorV1& evaluator, size_t row_count,
                             size_t estimated_filtered_out_count) {
         if (evaluator.abi_major != kCandidateEvaluatorAbiMajor ||
-            evaluator.struct_size < sizeof(CandidateEvaluatorV1) ||
-            evaluator.context == nullptr || evaluator.eval_batch == nullptr) {
+            evaluator.struct_size < sizeof(CandidateEvaluatorV1) || evaluator.context == nullptr ||
+            evaluator.eval_batch == nullptr) {
             throw std::invalid_argument("candidate evaluator ABI is incomplete or incompatible");
+        }
+        const bool declares_lease = (evaluator.abi_capabilities & kCandidateEvaluatorCapabilityLease) != 0;
+        if (declares_lease && (evaluator.lease_factory_context == nullptr || evaluator.acquire_lease == nullptr ||
+                               evaluator.release_lease == nullptr)) {
+            throw std::invalid_argument("candidate evaluator lease ABI is incomplete");
         }
         candidate_evaluator_ = evaluator;
         has_candidate_evaluator_ = true;
@@ -327,8 +331,7 @@ class BitsetView {
     void
     copy_candidate_evaluator_from(const BitsetView& other) {
         if (other.has_candidate_evaluator_) {
-            set_candidate_evaluator(other.candidate_evaluator_, other.size(),
-                                    other.extra_filtered_out_count_);
+            set_candidate_evaluator(other.candidate_evaluator_, other.size(), other.extra_filtered_out_count_);
         }
     }
 
@@ -507,19 +510,16 @@ class BitsetView {
     test_candidate_evaluator_(int64_t out_id) const {
         int64_t candidate_id = out_id;
         if (candidate_evaluator_.row_id_mapper != nullptr) {
-            candidate_id = candidate_evaluator_.row_id_mapper(
-                candidate_evaluator_.row_id_mapper_context, out_id);
+            candidate_id = candidate_evaluator_.row_id_mapper(candidate_evaluator_.row_id_mapper_context, out_id);
         }
         if (candidate_id < 0) {
             return true;
         }
         uint64_t valid_mask = 0;
-        const auto status = candidate_evaluator_.eval_batch(
-            candidate_evaluator_.context, &candidate_id, 1, uint64_t{1},
-            &valid_mask);
+        const auto status =
+            candidate_evaluator_.eval_batch(candidate_evaluator_.context, &candidate_id, 1, uint64_t{1}, &valid_mask);
         if (status != 0 || (valid_mask & ~uint64_t{1}) != 0) {
-            throw std::runtime_error(
-                "candidate evaluator violated its execution contract");
+            throw std::runtime_error("candidate evaluator violated its execution contract");
         }
         return (valid_mask & uint64_t{1}) == 0;
     }
