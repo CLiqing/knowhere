@@ -10,7 +10,56 @@
 #include <faiss/VectorTransform.h>
 #include <faiss/impl/FaissAssert.h>
 
+#include <cmath>
+#include <memory>
+
 namespace faiss::cppcontrib::knowhere {
+
+IndexPreTransformRaBitQCosine::IndexPreTransformRaBitQCosine() = default;
+
+IndexPreTransformRaBitQCosine::IndexPreTransformRaBitQCosine(
+        faiss::VectorTransform* transform,
+        faiss::Index* index_in)
+        : faiss::IndexPreTransform(transform, index_in) {}
+
+void IndexPreTransformRaBitQCosine::add(idx_t n, const float* x) {
+    faiss::IndexPreTransform::add(n, x);
+    inverse_norms_storage.add(x, n, d);
+}
+
+void IndexPreTransformRaBitQCosine::reset() {
+    faiss::IndexPreTransform::reset();
+    inverse_norms_storage.reset();
+}
+
+faiss::DistanceComputer* IndexPreTransformRaBitQCosine::get_distance_computer()
+        const {
+    FAISS_THROW_IF_NOT_MSG(
+            inverse_norms_storage.inverse_l2_norms.size() ==
+                    static_cast<size_t>(ntotal),
+            "cosine RaBitQ inverse norm count must match ntotal");
+    return new WithCosineNormDistanceComputer(
+            get_inverse_l2_norms(),
+            d,
+            std::unique_ptr<faiss::DistanceComputer>(
+                    faiss::IndexPreTransform::get_distance_computer()));
+}
+
+const float* IndexPreTransformRaBitQCosine::get_inverse_l2_norms() const {
+    return inverse_norms_storage.inverse_l2_norms.data();
+}
+
+void IndexPreTransformRaBitQCosine::validate_norms() const {
+    FAISS_THROW_IF_NOT_MSG(
+            inverse_norms_storage.inverse_l2_norms.size() ==
+                    static_cast<size_t>(ntotal),
+            "cosine RaBitQ inverse norm count must match ntotal");
+    for (const float inverse_norm : inverse_norms_storage.inverse_l2_norms) {
+        FAISS_THROW_IF_NOT_MSG(
+                std::isfinite(inverse_norm) && inverse_norm > 0.0f,
+                "cosine RaBitQ inverse norms must be finite and positive");
+    }
+}
 
 IndexHNSWRaBitQ::IndexHNSWRaBitQ() = default;
 
@@ -127,6 +176,34 @@ void IndexHNSWRaBitQ::validate_storage() const {
             "IndexHNSWRaBitQ requires qb=0 when nb_bits > 1");
     FAISS_THROW_IF_NOT_MSG(
             !rabitq->centered, "IndexHNSWRaBitQ V1 requires centered=false");
+}
+
+IndexHNSWRaBitQCosine::IndexHNSWRaBitQCosine() = default;
+
+IndexHNSWRaBitQCosine::IndexHNSWRaBitQCosine(
+        IndexPreTransformRaBitQCosine* storage_in,
+        int M)
+        : IndexHNSWRaBitQ(storage_in, M) {
+    validate_cosine_storage();
+}
+
+const float* IndexHNSWRaBitQCosine::get_inverse_l2_norms() const {
+    const auto* cosine_storage =
+            dynamic_cast<const IndexPreTransformRaBitQCosine*>(storage);
+    return cosine_storage ? cosine_storage->get_inverse_l2_norms() : nullptr;
+}
+
+void IndexHNSWRaBitQCosine::validate_cosine_storage() const {
+    validate_storage();
+    const auto* cosine_storage =
+            dynamic_cast<const IndexPreTransformRaBitQCosine*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            cosine_storage != nullptr,
+            "IndexHNSWRaBitQCosine requires cosine-aware pretransform storage");
+    FAISS_THROW_IF_NOT_MSG(
+            metric_type == METRIC_INNER_PRODUCT,
+            "IndexHNSWRaBitQCosine requires inner product storage");
+    cosine_storage->validate_norms();
 }
 
 } // namespace faiss::cppcontrib::knowhere

@@ -3080,11 +3080,11 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
 
         auto metric = Str2FaissMetricType(hnsw_cfg.metric_type.value());
         if (!metric.has_value() ||
-            (metric.value() != faiss::METRIC_L2 && metric.value() != faiss::METRIC_INNER_PRODUCT) ||
-            IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE)) {
-            LOG_KNOWHERE_ERROR_ << "HNSW_RABITQ only supports L2 and IP metrics";
+            (metric.value() != faiss::METRIC_L2 && metric.value() != faiss::METRIC_INNER_PRODUCT)) {
+            LOG_KNOWHERE_ERROR_ << "HNSW_RABITQ only supports L2, IP and COSINE metrics";
             return Status::invalid_metric_type;
         }
+        const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
         const auto& scalar_info_map =
             dataset->Get<std::unordered_map<int64_t, std::vector<std::vector<uint32_t>>>>(meta::SCALAR_INFO);
         if (!scalar_info_map.empty()) {
@@ -3100,8 +3100,14 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
         const auto* data = static_cast<const float*>(float_ds_ptr->GetTensor());
 
         try {
-            auto hnsw_index =
-                std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlat>(dim, hnsw_cfg.M.value(), metric.value());
+            std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> hnsw_index;
+            if (is_cosine) {
+                hnsw_index =
+                    std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlatCosine>(dim, hnsw_cfg.M.value());
+            } else {
+                hnsw_index = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWFlat>(dim, hnsw_cfg.M.value(),
+                                                                                          metric.value());
+            }
             hnsw_index->hnsw.efConstruction = hnsw_cfg.efConstruction.value();
 
             const auto rbq_bits = static_cast<uint8_t>(hnsw_cfg.rbq_bits.value());
@@ -3110,7 +3116,13 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
             rabitq_index->qb = 0;
             rabitq_index->centered = false;
             auto rotation = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
-            auto transformed_rabitq = std::make_unique<faiss::IndexPreTransform>(rotation.get(), rabitq_index.get());
+            std::unique_ptr<faiss::IndexPreTransform> transformed_rabitq;
+            if (is_cosine) {
+                transformed_rabitq = std::make_unique<faiss::cppcontrib::knowhere::IndexPreTransformRaBitQCosine>(
+                    rotation.get(), rabitq_index.get());
+            } else {
+                transformed_rabitq = std::make_unique<faiss::IndexPreTransform>(rotation.get(), rabitq_index.get());
+            }
             transformed_rabitq->own_fields = true;
             rotation.release();
             rabitq_index.release();
@@ -3186,7 +3198,13 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
                 return Status::invalid_index_error;
             }
 
-            auto index_hnsw_rabitq = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWRaBitQ>();
+            const bool is_cosine = faiss::cppcontrib::knowhere::is_cosine_index(index_hnsw->storage);
+            std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSWRaBitQ> index_hnsw_rabitq;
+            if (is_cosine) {
+                index_hnsw_rabitq = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWRaBitQCosine>();
+            } else {
+                index_hnsw_rabitq = std::make_unique<faiss::cppcontrib::knowhere::IndexHNSWRaBitQ>();
+            }
             // C++ slicing is intentional: preserve the exact graph while
             // changing only the runtime HNSW type and its vector storage.
             static_cast<faiss::cppcontrib::knowhere::IndexHNSW&>(*index_hnsw_rabitq) =
@@ -3197,7 +3215,12 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
             auto* flat_storage = index_hnsw->storage;
             index_hnsw_rabitq->storage = tmp_index_rabitq[0].get();
             index_hnsw_rabitq->own_fields = false;
-            index_hnsw_rabitq->validate_storage();
+            if (is_cosine) {
+                dynamic_cast<faiss::cppcontrib::knowhere::IndexHNSWRaBitQCosine*>(index_hnsw_rabitq.get())
+                    ->validate_cosine_storage();
+            } else {
+                index_hnsw_rabitq->validate_storage();
+            }
             index_hnsw_rabitq->own_fields = true;
             tmp_index_rabitq[0].release();
             index_hnsw->storage = nullptr;

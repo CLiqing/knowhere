@@ -21,6 +21,8 @@
 #include "catch2/catch_approx.hpp"
 #include "catch2/catch_test_macros.hpp"
 #include "faiss/IndexRaBitQ.h"
+#include "faiss/VectorTransform.h"
+#include "faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h"
 #include "faiss/impl/RaBitQUtils.h"
 #include "knowhere/bitsetview.h"
 #include "knowhere/comp/index_param.h"
@@ -169,13 +171,11 @@ TEST_CASE("HNSW_RABITQ validates metrics and bit widths", "[hnsw_rabitq]") {
         REQUIRE(index.Build(train, json) == knowhere::Status::out_of_range_in_json);
     }
 
-    {
-        auto index = knowhere::IndexFactory::Instance()
-                         .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_RABITQ, version)
-                         .value();
-        const auto json = MakeHnswRaBitQConfig(32, knowhere::metric::COSINE);
-        REQUIRE(index.Build(train, json) == knowhere::Status::invalid_metric_type);
-    }
+    auto index = knowhere::IndexFactory::Instance()
+                     .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_RABITQ, version)
+                     .value();
+    auto invalid_metric = MakeHnswRaBitQConfig(32, knowhere::metric::JACCARD);
+    REQUIRE(index.Build(train, invalid_metric) == knowhere::Status::invalid_metric_type);
 }
 
 TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabitq]") {
@@ -185,9 +185,10 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
         int rbq_bits;
     };
     const std::vector<Scenario> scenarios = {
-        {knowhere::metric::L2, 127, 1}, {knowhere::metric::IP, 129, 1}, {knowhere::metric::L2, 129, 2},
-        {knowhere::metric::IP, 65, 3},  {knowhere::metric::L2, 64, 4},  {knowhere::metric::IP, 65, 5},
-        {knowhere::metric::L2, 64, 6},  {knowhere::metric::L2, 128, 8}, {knowhere::metric::IP, 13, 9},
+        {knowhere::metric::L2, 127, 1}, {knowhere::metric::IP, 129, 1},    {knowhere::metric::L2, 129, 2},
+        {knowhere::metric::IP, 65, 3},  {knowhere::metric::L2, 64, 4},     {knowhere::metric::IP, 65, 5},
+        {knowhere::metric::L2, 64, 6},  {knowhere::metric::COSINE, 65, 4}, {knowhere::metric::COSINE, 128, 8},
+        {knowhere::metric::L2, 128, 8}, {knowhere::metric::IP, 13, 9},
     };
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
 
@@ -235,7 +236,8 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
 
         const auto* labels = before.value()->GetIds();
         const auto one_query = knowhere::GenDataSet(1, scenario.dim, query->GetTensor());
-        const auto distances = index.CalcDistByIDs(one_query, nullptr, labels, kTopk, false);
+        const bool is_cosine = knowhere::IsMetricType(scenario.metric, knowhere::metric::COSINE);
+        const auto distances = index.CalcDistByIDs(one_query, nullptr, labels, kTopk, is_cosine);
         REQUIRE(distances.has_value());
         for (int64_t i = 0; i < kTopk; ++i) {
             REQUIRE(distances.value()->GetDistance()[i] ==
@@ -244,8 +246,11 @@ TEST_CASE("HNSW_RABITQ searches, ranges, iterates, and round-trips", "[hnsw_rabi
 
         knowhere::BinarySet binary_set;
         REQUIRE(index.Serialize(binary_set) == knowhere::Status::success);
-        REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IHRK"));
+        REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), is_cosine ? "IHRC" : "IHRK"));
         REQUIRE_FALSE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IHNr"));
+        if (is_cosine) {
+            REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IRKC"));
+        }
         const char* storage_fourcc = scenario.rbq_bits == 1 ? "Ixrq" : "Ixrd";
         REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), storage_fourcc));
 
@@ -321,6 +326,63 @@ TEST_CASE("RaBitQ dense layout preserves packed distances", "[hnsw_rabitq]") {
     }
 }
 
+TEST_CASE("RaBitQ cosine storage applies post-norm correction", "[hnsw_rabitq]") {
+    constexpr int64_t dim = 13;
+    constexpr int64_t nb = 8;
+    const auto generated_base = GenDataSet(nb, dim, 1901);
+    auto query = GenDataSet(2, dim, 1902);
+    const auto* generated_base_data = static_cast<const float*>(generated_base->GetTensor());
+    std::vector<float> base_values(generated_base_data, generated_base_data + nb * dim);
+    auto* base_data = base_values.data();
+    const auto* query_data = static_cast<const float*>(query->GetTensor());
+
+    for (int64_t i = 0; i < nb; ++i) {
+        const float scale = static_cast<float>(i + 1);
+        for (int64_t j = 0; j < dim; ++j) {
+            base_data[i * dim + j] *= scale;
+        }
+    }
+    std::fill(base_data, base_data + dim, 0.0f);
+
+    auto* rotation = new faiss::RandomRotationMatrix(dim, dim);
+    auto* rabitq = new faiss::IndexRaBitQ(dim, faiss::METRIC_INNER_PRODUCT, 4, true);
+    rabitq->qb = 0;
+    rabitq->centered = false;
+    faiss::cppcontrib::knowhere::IndexPreTransformRaBitQCosine storage(rotation, rabitq);
+    storage.own_fields = true;
+    storage.train(nb, base_data);
+    storage.add(nb, base_data);
+    storage.validate_norms();
+
+    std::unique_ptr<faiss::DistanceComputer> raw_dc(storage.faiss::IndexPreTransform::get_distance_computer());
+    std::unique_ptr<faiss::DistanceComputer> cosine_dc(storage.get_distance_computer());
+    const auto* inverse_norms = storage.get_inverse_l2_norms();
+
+    for (int64_t q = 0; q < 2; ++q) {
+        const float* current_query = query_data + q * dim;
+        float query_norm_sqr = 0.0f;
+        for (int64_t j = 0; j < dim; ++j) {
+            query_norm_sqr += current_query[j] * current_query[j];
+        }
+        const float inverse_query_norm = query_norm_sqr > 0.0f ? 1.0f / std::sqrt(query_norm_sqr) : 1.0f;
+        raw_dc->set_query(current_query);
+        cosine_dc->set_query(current_query);
+        for (int64_t i = 0; i < nb; ++i) {
+            const float expected = (*raw_dc)(i)*inverse_norms[i] * inverse_query_norm;
+            REQUIRE((*cosine_dc)(i) == Catch::Approx(expected).epsilon(1e-6));
+        }
+
+        float raw_batch[4];
+        float cosine_batch[4];
+        raw_dc->distances_batch_4(0, 1, 2, 3, raw_batch[0], raw_batch[1], raw_batch[2], raw_batch[3]);
+        cosine_dc->distances_batch_4(0, 1, 2, 3, cosine_batch[0], cosine_batch[1], cosine_batch[2], cosine_batch[3]);
+        for (int64_t i = 0; i < 4; ++i) {
+            REQUIRE(cosine_batch[i] ==
+                    Catch::Approx(raw_batch[i] * inverse_norms[i] * inverse_query_norm).epsilon(1e-6));
+        }
+    }
+}
+
 TEST_CASE("HNSW_RABITQ supports optional refinement", "[hnsw_rabitq]") {
     constexpr int64_t dim = 32;
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
@@ -355,4 +417,59 @@ TEST_CASE("HNSW_RABITQ supports optional refinement", "[hnsw_rabitq]") {
     const auto loaded_result = loaded.Search(query, json, nullptr);
     REQUIRE(loaded_result.has_value());
     REQUIRE(TakeSnapshot(*loaded_result.value()).ids == TakeSnapshot(*result.value()).ids);
+}
+
+TEST_CASE("HNSW_RABITQ cosine refinement returns exact cosine", "[hnsw_rabitq]") {
+    constexpr int64_t dim = 32;
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    const auto train = GenDataSet(kNb, dim, 2001);
+    const auto query = GenDataSet(kNq, dim, 2002);
+    auto json = MakeHnswRaBitQConfig(dim, knowhere::metric::COSINE, 4);
+    json[knowhere::indexparam::REFINE] = true;
+    json[knowhere::indexparam::REFINE_TYPE] = "FLAT";
+    json[knowhere::indexparam::REFINE_K] = 2.0f;
+
+    auto index = knowhere::IndexFactory::Instance()
+                     .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_RABITQ, version)
+                     .value();
+    REQUIRE(index.Build(train, json) == knowhere::Status::success);
+    const auto result = index.Search(query, json, nullptr);
+    REQUIRE(result.has_value());
+    CheckValidKnnResult(*result.value(), kNb, kNq, kTopk);
+    CheckKnnOrder(*result.value(), knowhere::metric::COSINE);
+
+    const auto* base_data = static_cast<const float*>(train->GetTensor());
+    const auto* query_data = static_cast<const float*>(query->GetTensor());
+    for (int64_t q = 0; q < kNq; ++q) {
+        for (int64_t k = 0; k < kTopk; ++k) {
+            const int64_t id = result.value()->GetIds()[q * kTopk + k];
+            float dot = 0.0f;
+            float base_norm_sqr = 0.0f;
+            float query_norm_sqr = 0.0f;
+            for (int64_t j = 0; j < dim; ++j) {
+                const float bv = base_data[id * dim + j];
+                const float qv = query_data[q * dim + j];
+                dot += bv * qv;
+                base_norm_sqr += bv * bv;
+                query_norm_sqr += qv * qv;
+            }
+            const float expected = (base_norm_sqr == 0.0f || query_norm_sqr == 0.0f)
+                                       ? 0.0f
+                                       : dot / std::sqrt(base_norm_sqr * query_norm_sqr);
+            REQUIRE(result.value()->GetDistance()[q * kTopk + k] == Catch::Approx(expected).epsilon(2e-5));
+        }
+    }
+
+    knowhere::BinarySet binary_set;
+    REQUIRE(index.Serialize(binary_set) == knowhere::Status::success);
+    REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IHRC"));
+    REQUIRE(SerializedIndexContainsFourcc(binary_set, index.Type(), "IRKC"));
+    auto loaded = knowhere::IndexFactory::Instance()
+                      .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW_RABITQ, version)
+                      .value();
+    REQUIRE(loaded.Deserialize(binary_set, json) == knowhere::Status::success);
+    const auto loaded_result = loaded.Search(query, json, nullptr);
+    REQUIRE(loaded_result.has_value());
+    REQUIRE(TakeSnapshot(*loaded_result.value()).ids == TakeSnapshot(*result.value()).ids);
+    REQUIRE(TakeSnapshot(*loaded_result.value()).distances == TakeSnapshot(*result.value()).distances);
 }

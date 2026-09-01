@@ -217,8 +217,9 @@ class FaissHnswRaBitQConfig : public FaissHnswConfig {
         }
 
         const auto metric = str_to_lower(metric_type.value_or(knowhere::metric::L2));
-        if (metric != "l2" && metric != "ip") {
-            return HandleError(err_msg, "HNSW_RABITQ only supports L2 and IP metrics", Status::invalid_metric_type);
+        if (metric != "l2" && metric != "ip" && metric != "cosine") {
+            return HandleError(err_msg, "HNSW_RABITQ only supports L2, IP and COSINE metrics",
+                               Status::invalid_metric_type);
         }
 
         if (param_type == PARAM_TYPE::TRAIN && refine_type.has_value() &&
