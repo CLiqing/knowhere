@@ -14,13 +14,14 @@
 
 #include <roaring/roaring.h>
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -31,6 +32,16 @@ enum class BitsetPolarity : uint8_t {
     FilteredIds,
     ValidIds,
 };
+
+enum class FilterMapCapability : uint8_t {
+    RandomMembership,
+    EnumerateOnly,
+};
+
+using FilterMapTestFn = bool (*)(const void*, size_t);
+using FilterMapReadUnsetFn = size_t (*)(const void*, size_t*, int32_t*, size_t);
+using FilterMapGetUnsetSpanFn = bool (*)(const void*, const int32_t**, size_t*);
+using FilterMapEnsureDenseFn = const uint8_t* (*)(const void*);
 
 class BitsetView {
  public:
@@ -108,6 +119,32 @@ class BitsetView {
         if (num_filtered_out_bits.has_value()) {
             bitset.set_count(num_filtered_out_bits.value());
         }
+        return bitset;
+    }
+
+    // Type-erased canonical filter owned by the caller. Consumers branch on
+    // capability, never on Milvus' concrete list/Roaring/Dense backend.
+    static BitsetView
+    FromFilterMap(std::shared_ptr<const void> owner, const void* context, size_t num_bits, size_t num_filtered_out_bits,
+                  FilterMapCapability capability, FilterMapTestFn test, FilterMapReadUnsetFn read_unset,
+                  FilterMapGetUnsetSpanFn get_unset_span = nullptr, FilterMapEnsureDenseFn ensure_dense = nullptr) {
+        if (owner == nullptr || context == nullptr || read_unset == nullptr) {
+            throw std::invalid_argument("FilterMap owner, context and cursor callback must not be null");
+        }
+        if (capability == FilterMapCapability::RandomMembership && test == nullptr) {
+            throw std::invalid_argument("RandomMembership FilterMap requires a test callback");
+        }
+        BitsetView bitset;
+        bitset.kind_ = Kind::FilterMap;
+        bitset.filter_map_owner_ = std::move(owner);
+        bitset.filter_map_context_ = context;
+        bitset.filter_map_capability_ = capability;
+        bitset.filter_map_test_ = test;
+        bitset.filter_map_read_unset_ = read_unset;
+        bitset.filter_map_get_unset_span_ = get_unset_span;
+        bitset.filter_map_ensure_dense_ = ensure_dense;
+        bitset.num_bits_ = num_bits;
+        bitset.set_count(num_filtered_out_bits);
         return bitset;
     }
 
@@ -205,6 +242,56 @@ class BitsetView {
         return kind_ == Kind::ValidIdList;
     }
 
+    bool
+    is_filter_map() const {
+        return kind_ == Kind::FilterMap;
+    }
+
+    FilterMapCapability
+    filter_map_capability() const {
+        return filter_map_capability_;
+    }
+
+    size_t
+    read_filter_map_unset(size_t& cursor, std::span<int32_t> output) const {
+        if (!is_filter_map()) {
+            throw std::logic_error("unset cursor requested from a non-FilterMap bitset");
+        }
+        return filter_map_read_unset_(filter_map_context_, &cursor, output.data(), output.size());
+    }
+
+    std::optional<std::span<const int32_t>>
+    filter_map_unset_span() const {
+        if (!is_filter_map() || filter_map_get_unset_span_ == nullptr) {
+            return std::nullopt;
+        }
+        const int32_t* data = nullptr;
+        size_t size = 0;
+        if (!filter_map_get_unset_span_(filter_map_context_, &data, &size)) {
+            return std::nullopt;
+        }
+        if (data == nullptr && size != 0) {
+            throw std::logic_error("FilterMap returned a null non-empty unset-ID span");
+        }
+        return std::span<const int32_t>(data, size);
+    }
+
+    void
+    ensure_dense() {
+        if (!is_filter_map()) {
+            return;
+        }
+        if (filter_map_ensure_dense_ == nullptr) {
+            throw std::logic_error("FilterMap does not provide Dense materialization");
+        }
+        bits_ = filter_map_ensure_dense_(filter_map_context_);
+        if (bits_ == nullptr && num_bits_ != 0) {
+            throw std::logic_error("FilterMap Dense materialization returned null storage");
+        }
+        kind_ = Kind::Dense;
+        filter_map_capability_ = FilterMapCapability::RandomMembership;
+    }
+
     std::span<const int32_t>
     valid_ids() const {
         return {valid_ids_, valid_ids_count_};
@@ -223,9 +310,11 @@ class BitsetView {
     bool
     has_valid_storage() const {
         return num_bits_ == 0 ||
-               (kind_ == Kind::Dense ? bits_ != nullptr
-                                     : kind_ == Kind::Roaring ? roaring_ != nullptr
-                                                              : valid_ids_ != nullptr || valid_ids_count_ == 0);
+               (kind_ == Kind::Dense         ? bits_ != nullptr
+                : kind_ == Kind::Roaring     ? roaring_ != nullptr
+                : kind_ == Kind::ValidIdList ? valid_ids_ != nullptr || valid_ids_count_ == 0
+                                             : filter_map_owner_ != nullptr && filter_map_context_ != nullptr &&
+                                                   filter_map_read_unset_ != nullptr);
     }
 
     size_t
@@ -240,6 +329,24 @@ class BitsetView {
 
     std::vector<uint8_t>
     ToDense() const {
+        if (kind_ == Kind::FilterMap && filter_map_capability_ == FilterMapCapability::EnumerateOnly) {
+            std::vector<uint8_t> dense(byte_size(), 0xff);
+            if (!dense.empty() && (num_bits_ & 7) != 0) {
+                dense.back() &= static_cast<uint8_t>((1u << (num_bits_ & 7)) - 1);
+            }
+            size_t cursor = 0;
+            std::array<int32_t, 256> ids{};
+            while (const auto n = read_filter_map_unset(cursor, ids)) {
+                for (size_t i = 0; i < n; ++i) {
+                    const auto id = static_cast<size_t>(ids[i]);
+                    if (id >= num_bits_) {
+                        throw std::out_of_range("FilterMap cursor returned an ID outside its universe");
+                    }
+                    dense[id >> 3] &= static_cast<uint8_t>(~(1u << (id & 7)));
+                }
+            }
+            return dense;
+        }
         std::vector<uint8_t> dense(byte_size(), 0);
         for (size_t i = 0; i < num_bits_; ++i) {
             if (test(i)) {
@@ -296,6 +403,12 @@ class BitsetView {
             const bool contains = roaring_bitmap_contains(roaring_, static_cast<uint32_t>(out_id));
             return polarity_ == BitsetPolarity::FilteredIds ? contains : !contains;
         }
+        if (kind_ == Kind::FilterMap) {
+            if (filter_map_test_ == nullptr) {
+                throw std::logic_error("EnumerateOnly FilterMap does not support random membership");
+            }
+            return filter_map_test_(filter_map_context_, static_cast<size_t>(out_id));
+        }
         return bits_[out_id >> 3] & (0x1 << (out_id & 0x7));
     }
     // return the filtered ratio. if with id mapping, calculated by internal_ids rather than bits.
@@ -322,6 +435,9 @@ class BitsetView {
         if (kind_ == Kind::Roaring) {
             const auto cardinality = roaring_bitmap_get_cardinality(roaring_);
             return polarity_ == BitsetPolarity::FilteredIds ? cardinality : num_bits_ - cardinality;
+        }
+        if (kind_ == Kind::FilterMap) {
+            return num_filtered_out_bits_;
         }
         // if without id mapping, use a better algorithm to calculate the number of filtered out bits.
         size_t ret = 0;
@@ -362,6 +478,11 @@ class BitsetView {
                 }
             }
             return num_internal_ids_;
+        }
+        if (kind_ == Kind::FilterMap && filter_map_capability_ == FilterMapCapability::EnumerateOnly) {
+            size_t cursor = 0;
+            int32_t id = 0;
+            return read_filter_map_unset(cursor, std::span<int32_t>(&id, 1)) == 0 ? num_bits_ : static_cast<size_t>(id);
         }
         if (kind_ == Kind::Roaring) {
             for (size_t i = 0; i < num_bits_; i++) {
@@ -416,7 +537,7 @@ class BitsetView {
     }
 
  private:
-    enum class Kind { Dense, Roaring, ValidIdList };
+    enum class Kind { Dense, Roaring, ValidIdList, FilterMap };
 
     Kind kind_ = Kind::Dense;
     BitsetPolarity polarity_ = BitsetPolarity::FilteredIds;
@@ -429,6 +550,13 @@ class BitsetView {
     std::shared_ptr<const void> roaring_backing_owner_;
     std::shared_ptr<const roaring_bitmap_t> owned_roaring_;
     std::shared_ptr<const std::vector<int32_t>> owned_valid_ids_;
+    std::shared_ptr<const void> filter_map_owner_;
+    const void* filter_map_context_ = nullptr;
+    FilterMapCapability filter_map_capability_ = FilterMapCapability::RandomMembership;
+    FilterMapTestFn filter_map_test_ = nullptr;
+    FilterMapReadUnsetFn filter_map_read_unset_ = nullptr;
+    FilterMapGetUnsetSpanFn filter_map_get_unset_span_ = nullptr;
+    FilterMapEnsureDenseFn filter_map_ensure_dense_ = nullptr;
     size_t num_bits_ = 0;
     size_t num_filtered_out_bits_ = 0;
     bool count_known_ = false;

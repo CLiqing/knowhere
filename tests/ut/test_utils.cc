@@ -9,6 +9,7 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <array>
 #include <chrono>
 #include <memory>
 #include <new>
@@ -222,6 +223,95 @@ TEST_CASE("Test BitsetView distinguishes known zero count", "[utils]") {
     REQUIRE(known_zero.count() == 0);
 }
 
+TEST_CASE("Test BitsetView type-erased EnumerateOnly FilterMap", "[utils]") {
+    auto ids = std::make_shared<const std::vector<int32_t>>(std::vector<int32_t>{7, 1, 5});
+    auto view = knowhere::BitsetView::FromFilterMap(
+        std::shared_ptr<const void>(ids), ids.get(),
+        /*num_bits=*/10,
+        /*num_filtered_out_bits=*/7, knowhere::FilterMapCapability::EnumerateOnly,
+        /*test=*/nullptr,
+        [](const void* context, size_t* cursor, int32_t* output, size_t capacity) -> size_t {
+            const auto& source = *static_cast<const std::vector<int32_t>*>(context);
+            size_t written = 0;
+            while (*cursor < source.size() && written < capacity) {
+                output[written++] = source[(*cursor)++];
+            }
+            return written;
+        },
+        [](const void* context, const int32_t** data, size_t* size) -> bool {
+            const auto& source = *static_cast<const std::vector<int32_t>*>(context);
+            *data = source.data();
+            *size = source.size();
+            return true;
+        });
+
+    REQUIRE(view.is_filter_map());
+    REQUIRE(view.has_valid_storage());
+    REQUIRE(view.has_count());
+    REQUIRE(view.count() == 7);
+    REQUIRE(view.get_first_valid_index() == 7);
+    size_t cursor = 0;
+    std::array<int32_t, 2> batch{};
+    std::vector<int32_t> observed;
+    while (const auto n = view.read_filter_map_unset(cursor, batch)) {
+        observed.insert(observed.end(), batch.begin(), batch.begin() + n);
+    }
+    REQUIRE(observed == *ids);
+    const auto borrowed = view.filter_map_unset_span();
+    REQUIRE(borrowed.has_value());
+    REQUIRE(borrowed->data() == ids->data());
+    REQUIRE(borrowed->size() == ids->size());
+    const auto dense = view.ToDense();
+    for (size_t id = 0; id < 10; ++id) {
+        const bool filtered = (dense[id >> 3] & (1U << (id & 7))) != 0;
+        REQUIRE(filtered == (id != 1 && id != 5 && id != 7));
+    }
+    REQUIRE_THROWS(view.test(1));
+}
+
+TEST_CASE("Test BitsetView materializes a FilterMap at most once", "[utils]") {
+    struct FilterState {
+        std::vector<int32_t> unset_ids{7, 1, 5};
+        std::array<uint8_t, 2> dense{0xff, 0x03};
+        size_t materializations = 0;
+    };
+    auto state = std::make_shared<FilterState>();
+    auto view = knowhere::BitsetView::FromFilterMap(
+        std::shared_ptr<const void>(state), state.get(),
+        /*num_bits=*/10,
+        /*num_filtered_out_bits=*/7, knowhere::FilterMapCapability::EnumerateOnly,
+        /*test=*/nullptr,
+        [](const void* context, size_t* cursor, int32_t* output, size_t capacity) -> size_t {
+            const auto& source = static_cast<const FilterState*>(context)->unset_ids;
+            size_t written = 0;
+            while (*cursor < source.size() && written < capacity) {
+                output[written++] = source[(*cursor)++];
+            }
+            return written;
+        },
+        /*get_unset_span=*/nullptr,
+        [](const void* context) -> const uint8_t* {
+            auto* source = const_cast<FilterState*>(static_cast<const FilterState*>(context));
+            ++source->materializations;
+            for (const auto id : source->unset_ids) {
+                source->dense[static_cast<size_t>(id) >> 3] &=
+                    static_cast<uint8_t>(~(1U << (static_cast<size_t>(id) & 7)));
+            }
+            return source->dense.data();
+        });
+
+    view.ensure_dense();
+    view.ensure_dense();
+    REQUIRE(state->materializations == 1);
+    REQUIRE_FALSE(view.is_filter_map());
+    REQUIRE_FALSE(view.test(1));
+    REQUIRE_FALSE(view.test(5));
+    REQUIRE_FALSE(view.test(7));
+    REQUIRE(view.test(0));
+    REQUIRE(view.test(9));
+    REQUIRE(view.count() == 7);
+}
+
 TEST_CASE("Test BitsetView reports null storage", "[utils]") {
     knowhere::BitsetView null_dense(static_cast<const uint8_t*>(nullptr), 8);
     knowhere::BitsetView null_roaring(static_cast<const roaring_bitmap_t*>(nullptr), 8);
@@ -237,9 +327,8 @@ TEST_CASE("Test BitsetView Frozen Roaring", "[utils]") {
     }
     const auto frozen_size = roaring_bitmap_frozen_size_in_bytes(roaring);
     void* frozen_data = ::operator new(frozen_size, std::align_val_t(32));
-    auto frozen_owner = std::shared_ptr<const void>(frozen_data, [](const void* p) {
-        ::operator delete(const_cast<void*>(p), std::align_val_t(32));
-    });
+    auto frozen_owner = std::shared_ptr<const void>(
+        frozen_data, [](const void* p) { ::operator delete(const_cast<void*>(p), std::align_val_t(32)); });
     roaring_bitmap_frozen_serialize(roaring, static_cast<char*>(frozen_data));
 
     auto frozen_view = knowhere::BitsetView::FromFrozenRoaring(frozen_owner, frozen_data, frozen_size, 12, 4);
