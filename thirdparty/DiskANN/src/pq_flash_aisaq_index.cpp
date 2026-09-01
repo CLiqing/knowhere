@@ -474,7 +474,7 @@ int PQFlashAisaqIndex<T>::aisaq_init(
             return -1;
         }
     }
-    auto ctx_pool = AioContextPool::GetGlobalAioPool();
+    auto ctx_pool = DiskANNAioContextPool::GetGlobalAioPool();
     std::string pq_file_path =
         _aisaq_rearranged_index || _aisaq_rearrange_vectors_during_search
             ? (std::string(index_prefix) + "_pq_compressed_rearranged.bin")
@@ -639,7 +639,7 @@ bool PQFlashAisaqIndex<T>::aisaq_load_pq_cache(
                  AISAQ_SEARCH_PQ_CACHE_DIRECT_THRESHOLD_PCNT) /
                 100))));
 
-    auto ctx_pool = AioContextPool::GetGlobalAioPool();
+    auto ctx_pool = DiskANNAioContextPool::GetGlobalAioPool();
     auto io_ctx = ctx_pool->pop();
     uint32_t max_ios = ctx_pool->max_events_per_ctx();
     size_t max_vec_read_size = std::min((size_t)pq_cache_max_vec, (size_t)max_ios);
@@ -1336,7 +1336,7 @@ void PQFlashAisaqIndex<T>::aisaq_cached_beam_search(
         this->thread_data.push_notify_all();
         this->reader->put_ctx(ctx);
     };
-    auto ctx_pool = AioContextPool::GetGlobalAioPool();
+    auto ctx_pool = DiskANNAioContextPool::GetGlobalAioPool();
     auto max_ios = ctx_pool->max_events_per_ctx();
     size_t bv_cnt = 0;
     uint64_t local_l_search = l_search;

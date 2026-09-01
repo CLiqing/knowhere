@@ -1693,7 +1693,7 @@ namespace diskann {
     }
 
     const size_t batch_size = std::min(
-        {AioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
+        {DiskANNAioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
         defaults::MAX_N_SECTOR_READS, sectors_to_visit.size()});
     if (batch_size == 0) {
       this->reader->put_ctx(ctx);
@@ -1796,7 +1796,7 @@ namespace diskann {
     }
 
     const size_t batch_size =
-        std::min(AioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
+        std::min(DiskANNAioContextPool::GetGlobalAioPool()->max_events_per_ctx(),
                  std::min(defaults::MAX_N_SECTOR_READS / 2UL, sectors_to_visit.size()));
     const size_t half_buf_idx = defaults::MAX_N_SECTOR_READS / 2 * read_len_for_node;
     char        *sector_scratch = data.scratch.sector_scratch;
