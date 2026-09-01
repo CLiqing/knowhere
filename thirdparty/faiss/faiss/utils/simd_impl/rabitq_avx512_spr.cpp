@@ -484,6 +484,16 @@ float compute_inner_product_dense<SIMDLevel::AVX512_SPR>(
 }
 
 template <>
+float selected_float_sum_dense<SIMDLevel::AVX512_SPR>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits) {
+    return selected_float_sum_dense<SIMDLevel::AVX512>(
+            code, values, d, nbits);
+}
+
+template <>
 void compute_inner_product_dense_batch_4<SIMDLevel::AVX512_SPR>(
         const uint8_t* const codes[4],
         const float* query,

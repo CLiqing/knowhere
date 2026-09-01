@@ -403,14 +403,8 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
             return distance_to_code_1bit_impl(code, base_fac);
         }
 
-        float dot_qo = 0.0f;
-        for (size_t i = 0; i < d; i++) {
-            if ((rabitq_utils::extract_code_inline(
-                         code, i, nb_bits) &
-                 (1u << (nb_bits - 1))) != 0) {
-                dot_qo += rotated_q[i];
-            }
-        }
+        const float dot_qo = rabitq::multibit::selected_float_sum_dense<SL>(
+                code, rotated_q.data(), d, nb_bits);
         const float final_dot = query_fac.c1 * dot_qo - query_fac.c34;
         const float pre_dist = base_fac->or_minus_c_l2sqr +
                 query_fac.qr_to_c_L2sqr -

@@ -395,6 +395,52 @@ float compute_inner_product_dense(
         size_t nbits,
         float cb);
 
+/** Sum FP32 values whose dense n-bit code has its most-significant bit set. */
+template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
+inline float selected_float_sum_dense(
+        const uint8_t* __restrict code,
+        const float* __restrict values,
+        size_t d,
+        size_t nbits) {
+    float result = 0.0f;
+    const uint32_t sign_mask = uint32_t{1} << (nbits - 1);
+    const uint32_t code_mask = (uint32_t{1} << nbits) - 1;
+    for (size_t i = 0; i < d; i++) {
+        const size_t bit_pos = i * nbits;
+        const size_t byte_pos = bit_pos / 8;
+        const size_t shift = bit_pos % 8;
+        uint32_t window = code[byte_pos];
+        if (shift + nbits > 8) {
+            window |= uint32_t(code[byte_pos + 1]) << 8;
+        }
+        if (((window >> shift) & code_mask & sign_mask) != 0) {
+            result += values[i];
+        }
+    }
+    return result;
+}
+
+template <>
+float selected_float_sum_dense<SIMDLevel::AVX2>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits);
+
+template <>
+float selected_float_sum_dense<SIMDLevel::AVX512>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits);
+
+template <>
+float selected_float_sum_dense<SIMDLevel::AVX512_SPR>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits);
+
 template <SIMDLevel SL = SINGLE_SIMD_LEVEL>
 inline void compute_inner_product_byte_batch_4(
         const uint8_t* const codes[4],

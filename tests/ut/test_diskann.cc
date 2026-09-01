@@ -126,6 +126,44 @@ TEST_CASE("RaBitQ selected float sum SIMD matches scalar", "[diskann][rabitq][si
     }
 }
 
+TEST_CASE("Dense RaBitQ selected float sum SIMD matches scalar", "[diskann][rabitq][simd]") {
+    const std::vector<size_t> dimensions = {1, 7, 8, 15, 16, 17, 127, 128, 129, 768, 965};
+
+    for (size_t nbits = 2; nbits <= 8; ++nbits) {
+        const uint32_t code_mask = (uint32_t{1} << nbits) - 1;
+        for (const size_t dim : dimensions) {
+            std::vector<uint8_t> codes((dim * nbits + 7) / 8, 0);
+            std::vector<float> values(dim);
+            for (size_t i = 0; i < dim; ++i) {
+                const uint32_t value = static_cast<uint32_t>((i * 29 + nbits * 11) & code_mask);
+                const size_t bit_pos = i * nbits;
+                const size_t byte_pos = bit_pos / 8;
+                const size_t shift = bit_pos % 8;
+                codes[byte_pos] |= static_cast<uint8_t>(value << shift);
+                if (shift + nbits > 8) {
+                    codes[byte_pos + 1] |= static_cast<uint8_t>(value >> (8 - shift));
+                }
+                values[i] = static_cast<float>((static_cast<int>(i % 31) - 15) * 0.125 + (i % 7) * 0.003);
+            }
+
+            const float expected = faiss::rabitq::multibit::selected_float_sum_dense<faiss::SIMDLevel::NONE>(
+                codes.data(), values.data(), dim, nbits);
+            if (faiss::SIMDConfig::is_simd_level_available(faiss::SIMDLevel::AVX2)) {
+                const float actual =
+                    faiss::rabitq::multibit::selected_float_sum_dense<faiss::SIMDLevel::AVX2>(
+                        codes.data(), values.data(), dim, nbits);
+                REQUIRE(actual == Catch::Approx(expected).epsilon(1e-5).margin(2e-5));
+            }
+            if (faiss::SIMDConfig::is_simd_level_available(faiss::SIMDLevel::AVX512)) {
+                const float actual =
+                    faiss::rabitq::multibit::selected_float_sum_dense<faiss::SIMDLevel::AVX512>(
+                        codes.data(), values.data(), dim, nbits);
+                REQUIRE(actual == Catch::Approx(expected).epsilon(1e-5).margin(2e-5));
+            }
+        }
+    }
+}
+
 TEST_CASE("Valid diskann build params test", "[diskann]") {
     int rows_num = 1000000;
     auto version = GenTestVersionList();

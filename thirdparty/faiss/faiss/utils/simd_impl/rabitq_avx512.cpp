@@ -670,6 +670,72 @@ inline __m512 dense_decode_16_avx512(const uint8_t* code) {
     return _mm512_cvtepi32_ps(values);
 }
 
+template <size_t NBITS>
+float selected_float_sum_dense_avx512(
+        const uint8_t* __restrict code,
+        const float* __restrict values,
+        size_t d) {
+    __m512 acc = _mm512_setzero_ps();
+    if constexpr (NBITS == 4) {
+        size_t i = 0;
+        for (; i + 16 <= d; i += 16) {
+            uint16_t mask = 0;
+            const uint8_t* packed = code + i / 2;
+            for (size_t j = 0; j < 8; ++j) {
+                mask |= static_cast<uint16_t>((packed[j] >> 3) & 1)
+                        << (2 * j);
+                mask |= static_cast<uint16_t>((packed[j] >> 7) & 1)
+                        << (2 * j + 1);
+            }
+            acc = _mm512_add_ps(
+                    acc,
+                    _mm512_maskz_loadu_ps(
+                            static_cast<__mmask16>(mask), values + i));
+        }
+        return _mm512_reduce_add_ps(acc) +
+                selected_float_sum_dense<SIMDLevel::NONE>(
+                       code + i / 2, values + i, d - i, NBITS);
+    }
+    const __m512 threshold =
+            _mm512_set1_ps(float(uint32_t{1} << (NBITS - 1)));
+    size_t i = 0;
+    for (; i + 16 <= d; i += 16) {
+        const __m512 decoded = dense_decode_16_avx512<NBITS>(
+                code + (i * NBITS) / 8);
+        const __mmask16 mask =
+                _mm512_cmp_ps_mask(decoded, threshold, _CMP_GE_OQ);
+        acc = _mm512_add_ps(
+                acc, _mm512_maskz_loadu_ps(mask, values + i));
+    }
+    return _mm512_reduce_add_ps(acc) +
+            selected_float_sum_dense<SIMDLevel::NONE>(
+                   code + (i * NBITS) / 8, values + i, d - i, NBITS);
+}
+
+float selected_float_sum_dense_dispatch_avx512(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits) {
+    switch (nbits) {
+#define FAISS_RABITQ_DENSE_SIGN_CASE(NBITS)                    \
+    case NBITS:                                                \
+        return selected_float_sum_dense_avx512<NBITS>(         \
+                code, values, d)
+        FAISS_RABITQ_DENSE_SIGN_CASE(2);
+        FAISS_RABITQ_DENSE_SIGN_CASE(3);
+        FAISS_RABITQ_DENSE_SIGN_CASE(4);
+        FAISS_RABITQ_DENSE_SIGN_CASE(5);
+        FAISS_RABITQ_DENSE_SIGN_CASE(6);
+        FAISS_RABITQ_DENSE_SIGN_CASE(7);
+        FAISS_RABITQ_DENSE_SIGN_CASE(8);
+#undef FAISS_RABITQ_DENSE_SIGN_CASE
+        default:
+            return selected_float_sum_dense<SIMDLevel::NONE>(
+                    code, values, d, nbits);
+    }
+}
+
 inline __m512i dense_decode_3_64_u8_avx512(const uint8_t* code) {
     const __m256i shuf_0 = _mm256_setr_epi8(
             0, -1, 0, 1, 1, -1, 2, -1, 3, -1, 3, 4, 4, -1, 5, -1,
@@ -902,6 +968,16 @@ void ip_dense_batch_4_avx512(
 }
 
 } // namespace
+
+template <>
+float selected_float_sum_dense<SIMDLevel::AVX512>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits) {
+    return selected_float_sum_dense_dispatch_avx512(
+            code, values, d, nbits);
+}
 
 template <>
 float compute_inner_product_dense<SIMDLevel::AVX512>(

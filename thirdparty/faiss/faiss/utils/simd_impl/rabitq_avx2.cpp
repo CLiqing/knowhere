@@ -517,6 +517,54 @@ inline __m256 dense_decode_8_avx2(const uint8_t* code) {
 }
 
 template <size_t NBITS>
+float selected_float_sum_dense_avx2(
+        const uint8_t* __restrict code,
+        const float* __restrict values,
+        size_t d) {
+    __m256 acc = _mm256_setzero_ps();
+    const __m256 threshold =
+            _mm256_set1_ps(float(uint32_t{1} << (NBITS - 1)));
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        const __m256 decoded = dense_decode_8_avx2<NBITS>(
+                code + (i * NBITS) / 8);
+        const __m256 mask = _mm256_cmp_ps(decoded, threshold, _CMP_GE_OQ);
+        acc = _mm256_add_ps(
+                acc, _mm256_and_ps(_mm256_loadu_ps(values + i), mask));
+    }
+    float lanes[8];
+    _mm256_storeu_ps(lanes, acc);
+    return lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
+            lanes[5] + lanes[6] + lanes[7] +
+            selected_float_sum_dense<SIMDLevel::NONE>(
+                   code + (i * NBITS) / 8, values + i, d - i, NBITS);
+}
+
+float selected_float_sum_dense_dispatch_avx2(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits) {
+    switch (nbits) {
+#define FAISS_RABITQ_DENSE_SIGN_CASE(NBITS)                    \
+    case NBITS:                                                \
+        return selected_float_sum_dense_avx2<NBITS>(           \
+                code, values, d)
+        FAISS_RABITQ_DENSE_SIGN_CASE(2);
+        FAISS_RABITQ_DENSE_SIGN_CASE(3);
+        FAISS_RABITQ_DENSE_SIGN_CASE(4);
+        FAISS_RABITQ_DENSE_SIGN_CASE(5);
+        FAISS_RABITQ_DENSE_SIGN_CASE(6);
+        FAISS_RABITQ_DENSE_SIGN_CASE(7);
+        FAISS_RABITQ_DENSE_SIGN_CASE(8);
+#undef FAISS_RABITQ_DENSE_SIGN_CASE
+        default:
+            return selected_float_sum_dense<SIMDLevel::NONE>(
+                    code, values, d, nbits);
+    }
+}
+
+template <size_t NBITS>
 float ip_dense_avx2(
         const uint8_t* __restrict code,
         const float* __restrict query,
@@ -583,6 +631,16 @@ void ip_dense_batch_4_avx2(
 }
 
 } // namespace
+
+template <>
+float selected_float_sum_dense<SIMDLevel::AVX2>(
+        const uint8_t* code,
+        const float* values,
+        size_t d,
+        size_t nbits) {
+    return selected_float_sum_dense_dispatch_avx2(
+            code, values, d, nbits);
+}
 
 template <>
 float compute_inner_product_dense<SIMDLevel::AVX2>(
