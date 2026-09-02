@@ -46,6 +46,12 @@ struct AnnFilterPlanRequestV1 {
     uint32_t predicate_logical_node_count = 0;
 };
 
+// Required V1 prefix. Future append-only fields must not change this constant;
+// consumers probe any appended field through request.struct_size.
+inline constexpr size_t kAnnFilterPlanRequestV1MinimumSize =
+    offsetof(AnnFilterPlanRequestV1, predicate_logical_node_count) +
+    sizeof(uint32_t);
+
 struct AnnFilterPlanResultV1 {
     uint32_t abi_major = kAnnFilterPlannerAbiMajor;
     uint32_t struct_size = sizeof(AnnFilterPlanResultV1);
@@ -53,10 +59,19 @@ struct AnnFilterPlanResultV1 {
     AnnFilterPlanReason reason = AnnFilterPlanReason::kPlannerUnavailable;
 };
 
+// Required V1 result prefix; future optional result fields may be appended.
+inline constexpr size_t kAnnFilterPlanResultV1MinimumSize =
+    offsetof(AnnFilterPlanResultV1, reason) +
+    sizeof(AnnFilterPlanReason);
+
 static_assert(std::is_standard_layout_v<AnnFilterPlanRequestV1>);
 static_assert(std::is_trivially_copyable_v<AnnFilterPlanRequestV1>);
 static_assert(std::is_standard_layout_v<AnnFilterPlanResultV1>);
 static_assert(std::is_trivially_copyable_v<AnnFilterPlanResultV1>);
+static_assert(kAnnFilterPlanRequestV1MinimumSize <=
+              sizeof(AnnFilterPlanRequestV1));
+static_assert(kAnnFilterPlanResultV1MinimumSize <=
+              sizeof(AnnFilterPlanResultV1));
 
 // Optional capability implemented only by backends that own an ANN fusing
 // plan. Keeping this separate avoids changing IndexNode's cross-DSO vtable.

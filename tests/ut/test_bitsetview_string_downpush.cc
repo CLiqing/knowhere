@@ -1,8 +1,13 @@
 #include <array>
 #include <cstdint>
+#include <type_traits>
 
 #include "catch2/catch_test_macros.hpp"
 #include "knowhere/bitsetview.h"
+#include "knowhere/candidate_evaluator.h"
+
+static_assert(std::is_same_v<knowhere::BitsetView::CandidateEvaluatorV1,
+                             knowhere::CandidateEvaluatorV1>);
 
 namespace {
 
@@ -69,6 +74,34 @@ TEST_CASE("BitsetView carries an expression-agnostic candidate evaluator") {
         knowhere::BitsetView compatible;
         compatible.set_candidate_evaluator(original, selected.size(), 2);
         CHECK_FALSE(compatible.test(1));
+    }
+
+    SECTION("append-only and unknown optional capabilities remain compatible") {
+        auto extended = evaluator;
+        extended.struct_size = sizeof(extended) + 32;
+        extended.abi_capabilities |= uint64_t{1} << 63;
+        knowhere::BitsetView compatible;
+        compatible.set_candidate_evaluator(extended, selected.size(), 2);
+        CHECK_FALSE(compatible.test(3));
+    }
+
+    SECTION("wrong major and undersized required prefix are rejected") {
+        auto wrong_major = evaluator;
+        ++wrong_major.abi_major;
+        knowhere::BitsetView rejected_major;
+        CHECK_THROWS_AS(
+            rejected_major.set_candidate_evaluator(
+                wrong_major, selected.size(), 2),
+            std::invalid_argument);
+
+        auto undersized = evaluator;
+        undersized.struct_size =
+            knowhere::kCandidateEvaluatorV1MinimumSize - 1;
+        knowhere::BitsetView rejected_size;
+        CHECK_THROWS_AS(
+            rejected_size.set_candidate_evaluator(
+                undersized, selected.size(), 2),
+            std::invalid_argument);
     }
 
     SECTION("a wrapper keeps estimated and exact filtered counts separate") {

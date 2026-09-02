@@ -22,42 +22,21 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
+
+#include "knowhere/candidate_evaluator.h"
 
 namespace knowhere {
 class BitsetView {
  public:
-    static constexpr uint32_t kCandidateEvaluatorAbiMajor = 1;
-    static constexpr uint64_t kCandidateEvaluatorCapabilityLease = 1ULL << 0;
-
-    struct CandidateEvaluatorV1 {
-        using EvalBatch = int32_t (*)(const void*, const int64_t*, uint32_t, uint64_t, uint64_t*) noexcept;
-        using EvalContiguous = int32_t (*)(const void*, int64_t, uint32_t, uint64_t, uint64_t*) noexcept;
-        using RowIdMapper = int64_t (*)(const void*, int64_t) noexcept;
-        using AcquireLease = void* (*)(const void*) noexcept;
-        using ReleaseLease = void (*)(void*) noexcept;
-
-        uint32_t abi_major = 0;
-        uint32_t struct_size = 0;
-        uint64_t abi_capabilities = 0;
-        const void* context = nullptr;
-        EvalBatch eval_batch = nullptr;
-        EvalContiguous eval_contiguous = nullptr;
-        const void* row_id_mapper_context = nullptr;
-        RowIdMapper row_id_mapper = nullptr;
-        const void* lease_factory_context = nullptr;
-        AcquireLease acquire_lease = nullptr;
-        ReleaseLease release_lease = nullptr;
-    };
-
-    static_assert(std::is_trivially_copyable_v<CandidateEvaluatorV1>);
-    static_assert(std::is_standard_layout_v<CandidateEvaluatorV1>);
-
-    // Fields before lease_factory_context are the original v1 ABI.  Lease
-    // support was appended as an optional capability, so producers using the
-    // original layout remain valid when they do not advertise that capability.
+    // Compatibility aliases keep existing BitsetView consumers source-stable;
+    // the ABI itself has a single definition in candidate_evaluator.h.
+    using CandidateEvaluatorV1 = knowhere::CandidateEvaluatorV1;
+    static constexpr uint32_t kCandidateEvaluatorAbiMajor =
+        knowhere::kCandidateEvaluatorAbiMajor;
+    static constexpr uint64_t kCandidateEvaluatorCapabilityLease =
+        knowhere::kCandidateEvaluatorCapabilityLease;
     static constexpr size_t kCandidateEvaluatorV1MinimumSize =
-        offsetof(CandidateEvaluatorV1, lease_factory_context);
+        knowhere::kCandidateEvaluatorV1MinimumSize;
 
     BitsetView() = default;
     ~BitsetView() = default;
