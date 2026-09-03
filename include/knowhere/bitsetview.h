@@ -31,12 +31,11 @@ class BitsetView {
     // Compatibility aliases keep existing BitsetView consumers source-stable;
     // the ABI itself has a single definition in candidate_evaluator.h.
     using CandidateEvaluatorV1 = knowhere::CandidateEvaluatorV1;
-    static constexpr uint32_t kCandidateEvaluatorAbiMajor =
-        knowhere::kCandidateEvaluatorAbiMajor;
-    static constexpr uint64_t kCandidateEvaluatorCapabilityLease =
-        knowhere::kCandidateEvaluatorCapabilityLease;
-    static constexpr size_t kCandidateEvaluatorV1MinimumSize =
-        knowhere::kCandidateEvaluatorV1MinimumSize;
+    static constexpr uint32_t kCandidateEvaluatorAbiMajor = knowhere::kCandidateEvaluatorAbiMajor;
+    static constexpr uint64_t kCandidateEvaluatorCapabilityLease = knowhere::kCandidateEvaluatorCapabilityLease;
+    static constexpr uint64_t kCandidateEvaluatorCapabilityWorkerWorkspace =
+        knowhere::kCandidateEvaluatorCapabilityWorkerWorkspace;
+    static constexpr size_t kCandidateEvaluatorV1MinimumSize = knowhere::kCandidateEvaluatorV1MinimumSize;
 
     BitsetView() = default;
     ~BitsetView() = default;
@@ -168,6 +167,14 @@ class BitsetView {
             (evaluator.struct_size < sizeof(CandidateEvaluatorV1) || evaluator.lease_factory_context == nullptr ||
              evaluator.acquire_lease == nullptr || evaluator.release_lease == nullptr)) {
             throw std::invalid_argument("candidate evaluator lease ABI is incomplete");
+        }
+        const bool declares_workspace =
+            (evaluator.abi_capabilities & kCandidateEvaluatorCapabilityWorkerWorkspace) != 0;
+        if (declares_workspace &&
+            (evaluator.struct_size < sizeof(CandidateEvaluatorV1) || evaluator.create_workspace == nullptr ||
+             evaluator.release_workspace == nullptr || evaluator.eval_batch_with_workspace == nullptr ||
+             evaluator.eval_contiguous_with_workspace == nullptr)) {
+            throw std::invalid_argument("candidate evaluator worker workspace ABI is incomplete");
         }
         candidate_evaluator_ = evaluator;
         has_candidate_evaluator_ = true;

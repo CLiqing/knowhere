@@ -17,6 +17,7 @@ namespace knowhere {
 // are discovered through struct_size plus abi_capabilities.
 inline constexpr uint32_t kCandidateEvaluatorAbiMajor = 1;
 inline constexpr uint64_t kCandidateEvaluatorCapabilityLease = 1ULL << 0;
+inline constexpr uint64_t kCandidateEvaluatorCapabilityWorkerWorkspace = 1ULL << 1;
 
 // Evaluates arbitrary logical segment row IDs.
 //
@@ -29,31 +30,35 @@ inline constexpr uint64_t kCandidateEvaluatorCapabilityLease = 1ULL << 0;
 //                a subset of active_mask and bits >= count must be zero.
 // return: zero on success, non-zero on failure. No exception may cross this
 //         noexcept boundary.
-using CandidateEvalBatchFn = int32_t (*)(const void* context,
-                                         const int64_t* row_ids,
-                                         uint32_t count,
-                                         uint64_t active_mask,
-                                         uint64_t* accepted_mask) noexcept;
+using CandidateEvalBatchFn = int32_t (*)(const void* context, const int64_t* row_ids, uint32_t count,
+                                         uint64_t active_mask, uint64_t* accepted_mask) noexcept;
 
 // Evaluates the contiguous logical row-ID range
 // [first_row_id, first_row_id + count) under the same mask/result contract as
 // CandidateEvalBatchFn. This optional fast path is used by scan completion.
-using CandidateEvalContiguousFn = int32_t (*)(const void* context,
-                                              int64_t first_row_id,
-                                              uint32_t count,
-                                              uint64_t active_mask,
-                                              uint64_t* accepted_mask) noexcept;
+using CandidateEvalContiguousFn = int32_t (*)(const void* context, int64_t first_row_id, uint32_t count,
+                                              uint64_t active_mask, uint64_t* accepted_mask) noexcept;
 
 // Maps an index-internal/physical row ID to the logical segment row-ID domain
 // expected by the evaluator; a negative result rejects the candidate.
-using CandidateEvaluatorRowIdMapperFn = int64_t (*)(
-    const void* context, int64_t internal_row_id) noexcept;
+using CandidateEvaluatorRowIdMapperFn = int64_t (*)(const void* context, int64_t internal_row_id) noexcept;
 
 // Optional iterator ownership protocol. acquire_lease returns an opaque owned
 // lease retained until the matching release_lease call.
-using CandidateEvaluatorAcquireLeaseFn = void* (*)(
-    const void* context) noexcept;
+using CandidateEvaluatorAcquireLeaseFn = void* (*)(const void* context) noexcept;
 using CandidateEvaluatorReleaseLeaseFn = void (*)(void* lease) noexcept;
+
+// Optional per-worker mutable scratch. The prepared evaluator context remains
+// immutable and query-scoped; every concurrent search worker and every
+// iterator workspace creates and owns one independent workspace.
+using CandidateEvaluatorCreateWorkspaceFn = void* (*)(const void* context) noexcept;
+using CandidateEvaluatorReleaseWorkspaceFn = void (*)(void* workspace) noexcept;
+using CandidateEvalBatchWithWorkspaceFn = int32_t (*)(const void* context, void* workspace, const int64_t* row_ids,
+                                                      uint32_t count, uint64_t active_mask,
+                                                      uint64_t* accepted_mask) noexcept;
+using CandidateEvalContiguousWithWorkspaceFn = int32_t (*)(const void* context, void* workspace, int64_t first_row_id,
+                                                           uint32_t count, uint64_t active_mask,
+                                                           uint64_t* accepted_mask) noexcept;
 
 struct CandidateEvaluatorV1 {
     uint32_t abi_major = kCandidateEvaluatorAbiMajor;
@@ -67,6 +72,10 @@ struct CandidateEvaluatorV1 {
     const void* lease_factory_context = nullptr;
     CandidateEvaluatorAcquireLeaseFn acquire_lease = nullptr;
     CandidateEvaluatorReleaseLeaseFn release_lease = nullptr;
+    CandidateEvaluatorCreateWorkspaceFn create_workspace = nullptr;
+    CandidateEvaluatorReleaseWorkspaceFn release_workspace = nullptr;
+    CandidateEvalBatchWithWorkspaceFn eval_batch_with_workspace = nullptr;
+    CandidateEvalContiguousWithWorkspaceFn eval_contiguous_with_workspace = nullptr;
 };
 
 static_assert(std::is_trivially_copyable_v<CandidateEvaluatorV1>);
@@ -75,9 +84,7 @@ static_assert(std::is_standard_layout_v<CandidateEvaluatorV1>);
 // Fields before lease_factory_context form the required V1 prefix. Lease
 // fields were appended as an optional capability and must not be read unless
 // both struct_size and the capability bit declare them.
-inline constexpr size_t kCandidateEvaluatorV1MinimumSize =
-    offsetof(CandidateEvaluatorV1, lease_factory_context);
-static_assert(kCandidateEvaluatorV1MinimumSize <=
-              sizeof(CandidateEvaluatorV1));
+inline constexpr size_t kCandidateEvaluatorV1MinimumSize = offsetof(CandidateEvaluatorV1, lease_factory_context);
+static_assert(kCandidateEvaluatorV1MinimumSize <= sizeof(CandidateEvaluatorV1));
 
 }  // namespace knowhere
