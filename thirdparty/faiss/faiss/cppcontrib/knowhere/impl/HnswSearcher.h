@@ -19,6 +19,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <queue>
 
@@ -43,6 +45,39 @@ namespace {
 
 // whether to track statistics
 constexpr bool track_hnsw_stats = true;
+
+inline bool
+rabitq_staged_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KNOWHERE_RABITQ_STAGED");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+struct RaBitQStagedSearchStats {
+    std::atomic<uint64_t> n_1bit{0};
+    std::atomic<uint64_t> n_refine{0};
+
+    ~RaBitQStagedSearchStats() {
+        const auto n1 = n_1bit.load(std::memory_order_relaxed);
+        const auto nr = n_refine.load(std::memory_order_relaxed);
+        if (n1 != 0) {
+            std::fprintf(
+                    stderr,
+                    "RABITQ_STAGED_SEARCHER_STATS n_1bit=%llu n_refine=%llu refine_ratio=%.6f\n",
+                    static_cast<unsigned long long>(n1),
+                    static_cast<unsigned long long>(nr),
+                    static_cast<double>(nr) / static_cast<double>(n1));
+        }
+    }
+};
+
+inline RaBitQStagedSearchStats&
+rabitq_staged_stats() {
+    static RaBitQStagedSearchStats stats;
+    return stats;
+}
 
 } // namespace
 
@@ -169,11 +204,12 @@ struct v2_hnsw_searcher {
     }
 
     // no loops, just check neighbors of a single node.
-    template <typename FuncAddCandidate>
+    template <typename FuncGetThreshold, typename FuncAddCandidate>
     faiss::cppcontrib::knowhere::HNSWStats evaluate_single_node(
             const idx_t node_id,
             const int level,
             float& accumulated_alpha,
+            FuncGetThreshold func_get_threshold,
             FuncAddCandidate func_add_candidate) {
         // // unused
         // bool do_dis_check = params ? params->check_relative_distance
@@ -233,15 +269,34 @@ struct v2_hnsw_searcher {
             if (counter == 4) {
                 // evaluate 4x distances at once
                 float dis[4] = {0, 0, 0, 0};
-                qdis.distances_batch_4(
-                        saved_indices[0],
-                        saved_indices[1],
-                        saved_indices[2],
-                        saved_indices[3],
-                        dis[0],
-                        dis[1],
-                        dis[2],
-                        dis[3]);
+                const bool use_staged = level == 0 &&
+                        rabitq_staged_enabled() &&
+                        qdis.supports_rabitq_staged();
+                if (use_staged) {
+                    auto& staged_stats = rabitq_staged_stats();
+                    for (size_t id4 = 0; id4 < 4; ++id4) {
+                        const auto id = saved_indices[id4];
+                        const float estimate = qdis.rabitq_distance_1bit(id);
+                        staged_stats.n_1bit.fetch_add(1, std::memory_order_relaxed);
+                        dis[id4] = estimate;
+                        if (qdis.rabitq_should_refine(
+                                    id, estimate, func_get_threshold(), false)) {
+                            dis[id4] = qdis.rabitq_distance_full(id);
+                            staged_stats.n_refine.fetch_add(
+                                    1, std::memory_order_relaxed);
+                        }
+                    }
+                } else {
+                    qdis.distances_batch_4(
+                            saved_indices[0],
+                            saved_indices[1],
+                            saved_indices[2],
+                            saved_indices[3],
+                            dis[0],
+                            dis[1],
+                            dis[2],
+                            dis[3]);
+                }
 
                 for (size_t id4 = 0; id4 < 4; id4++) {
                     // record a traversed edge
@@ -266,7 +321,22 @@ struct v2_hnsw_searcher {
         // process leftovers
         for (size_t id4 = 0; id4 < counter; id4++) {
             // evaluate a single distance
-            const float dis = qdis(saved_indices[id4]);
+            float dis;
+            if (level == 0 && rabitq_staged_enabled() &&
+                qdis.supports_rabitq_staged()) {
+                const auto id = saved_indices[id4];
+                dis = qdis.rabitq_distance_1bit(id);
+                auto& staged_stats = rabitq_staged_stats();
+                staged_stats.n_1bit.fetch_add(1, std::memory_order_relaxed);
+                if (qdis.rabitq_should_refine(
+                            id, dis, func_get_threshold(), false)) {
+                    dis = qdis.rabitq_distance_full(id);
+                    staged_stats.n_refine.fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+            } else {
+                dis = qdis(saved_indices[id4]);
+            }
 
             // record a traversed edge
             graph_visitor.visit_edge(level, node_id, saved_indices[id4], dis);
@@ -289,6 +359,20 @@ struct v2_hnsw_searcher {
 
         // done
         return stats;
+    }
+
+    template <typename FuncAddCandidate>
+    faiss::cppcontrib::knowhere::HNSWStats evaluate_single_node(
+            const idx_t node_id,
+            const int level,
+            float& accumulated_alpha,
+            FuncAddCandidate func_add_candidate) {
+        return evaluate_single_node(
+                node_id,
+                level,
+                accumulated_alpha,
+                [] { return std::numeric_limits<float>::max(); },
+                func_add_candidate);
     }
 
     // perform the search on a given level.
@@ -318,6 +402,7 @@ struct v2_hnsw_searcher {
                     neighbor.id,
                     level,
                     accumulated_alpha,
+                    [&retset] { return retset.at_search_back_dist(); },
                     add_search_candidate);
 
             // update stats

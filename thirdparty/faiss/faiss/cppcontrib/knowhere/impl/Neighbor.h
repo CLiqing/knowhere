@@ -197,6 +197,11 @@ class NeighborSetDoublePopList {
         return valid_ns_->size();
     }
 
+    inline float
+    at_search_back_dist() const {
+        return valid_ns_->at_search_back_dist();
+    }
+
  private:
     auto
     pop_based_on_distance() -> Neighbor {

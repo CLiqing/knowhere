@@ -404,11 +404,20 @@ struct RaBitQDistanceComputerNotQ final : RaBitQDistanceComputer {
         }
 
         float dot_qo = 0.0f;
-        for (size_t i = 0; i < d; i++) {
-            if ((rabitq_utils::extract_code_inline(
-                         code, i, nb_bits) &
-                 (1u << (nb_bits - 1))) != 0) {
-                dot_qo += rotated_q[i];
+        if (nb_bits == 8) {
+            // Dense RBQ8 stores one complete code per byte.  Avoid the
+            // generic bit-stream extractor in the coarse sign-only pass;
+            // this branchless loop is also straightforward to auto-vectorize.
+            for (size_t i = 0; i < d; i++) {
+                dot_qo += static_cast<float>(code[i] >> 7) * rotated_q[i];
+            }
+        } else {
+            for (size_t i = 0; i < d; i++) {
+                if ((rabitq_utils::extract_code_inline(
+                             code, i, nb_bits) &
+                     (1u << (nb_bits - 1))) != 0) {
+                    dot_qo += rotated_q[i];
+                }
             }
         }
         const float final_dot = query_fac.c1 * dot_qo - query_fac.c34;
