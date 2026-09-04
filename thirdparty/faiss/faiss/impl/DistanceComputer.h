@@ -30,6 +30,25 @@ struct DistanceComputer {
     /// compute distance of vector i to current query
     virtual float operator()(idx_t i) = 0;
 
+    // Experimental hook used by the FP32-graph RaBitQ staged-search demo.
+    // Ordinary distance computers keep the default disabled implementation.
+    virtual bool supports_rabitq_staged() const {
+        return false;
+    }
+    virtual float rabitq_distance_1bit(idx_t) {
+        FAISS_THROW_MSG("RaBitQ staged distance is not supported");
+    }
+    virtual float rabitq_distance_full(idx_t i) {
+        return (*this)(i);
+    }
+    virtual bool rabitq_should_refine(
+            idx_t,
+            float,
+            float,
+            bool) const {
+        return true;
+    }
+
     /// compute distances of current query to 4 stored vectors.
     /// certain DistanceComputer implementations may benefit
     /// heavily from this.

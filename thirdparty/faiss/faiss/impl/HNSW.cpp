@@ -8,8 +8,10 @@
 #include <faiss/impl/HNSW.h>
 
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <type_traits>
 
@@ -302,6 +304,32 @@ template void HNSW::shrink_neighbor_list<HNSW::C_similarity>(
         bool);
 
 namespace {
+
+std::atomic<uint64_t> rabitq_staged_n_1bit{0};
+std::atomic<uint64_t> rabitq_staged_n_refine{0};
+
+struct RaBitQStagedStatsReporter {
+    ~RaBitQStagedStatsReporter() {
+        if (std::getenv("KNOWHERE_RABITQ_STAGED") == nullptr) {
+            return;
+        }
+        const uint64_t n_1bit =
+                rabitq_staged_n_1bit.load(std::memory_order_relaxed);
+        const uint64_t n_refine =
+                rabitq_staged_n_refine.load(std::memory_order_relaxed);
+        std::fprintf(
+                stderr,
+                "RABITQ_STAGED_STATS n_1bit=%" PRIu64
+                " n_refine=%" PRIu64 " refine_ratio=%.8f\n",
+                n_1bit,
+                n_refine,
+                n_1bit == 0 ? 0.0
+                             : static_cast<double>(n_refine) /
+                                static_cast<double>(n_1bit));
+    }
+};
+
+RaBitQStagedStatsReporter rabitq_staged_stats_reporter;
 
 using storage_idx_t = HNSW::storage_idx_t;
 
@@ -913,6 +941,10 @@ int search_from_candidates_fixVT(
     const IDSelector* sel;
     extract_search_params(hnsw, params, do_dis_check, efSearch, sel);
 
+    const bool use_rabitq_staged =
+            level == 0 && std::getenv("KNOWHERE_RABITQ_STAGED") != nullptr &&
+            qdis.supports_rabitq_staged();
+
     vt.reserve(efSearch);
 
     typename C::T threshold = res.threshold;
@@ -987,30 +1019,68 @@ int search_from_candidates_fixVT(
             counter += vt.set(v1) ? 1 : 0;
 
             if (counter == 4) {
-                float dis[4];
-                qdis.distances_batch_4(
-                        saved_j[0],
-                        saved_j[1],
-                        saved_j[2],
-                        saved_j[3],
-                        dis[0],
-                        dis[1],
-                        dis[2],
-                        dis[3]);
+                if (use_rabitq_staged) {
+                    for (size_t id4 = 0; id4 < 4; id4++) {
+                        const auto id = saved_j[id4];
+                        const float estimate = qdis.rabitq_distance_1bit(id);
+                        rabitq_staged_n_1bit.fetch_add(
+                                1, std::memory_order_relaxed);
+                        float dis = estimate;
+                        if (qdis.rabitq_should_refine(
+                                    id,
+                                    estimate,
+                                    threshold,
+                                    hnsw.is_similarity)) {
+                            dis = qdis.rabitq_distance_full(id);
+                            rabitq_staged_n_refine.fetch_add(
+                                    1, std::memory_order_relaxed);
+                            ndis++;
+                        }
+                        add_to_heap(id, dis);
+                    }
+                    ndis += 4;
+                } else {
+                    float dis[4];
+                    qdis.distances_batch_4(
+                            saved_j[0],
+                            saved_j[1],
+                            saved_j[2],
+                            saved_j[3],
+                            dis[0],
+                            dis[1],
+                            dis[2],
+                            dis[3]);
 
-                for (size_t id4 = 0; id4 < 4; id4++) {
-                    add_to_heap(saved_j[id4], dis[id4]);
+                    for (size_t id4 = 0; id4 < 4; id4++) {
+                        add_to_heap(saved_j[id4], dis[id4]);
+                    }
+
+                    ndis += 4;
                 }
-
-                ndis += 4;
 
                 counter = 0;
             }
         }
 
         for (int icnt = 0; icnt < counter; icnt++) {
-            float dis = qdis(saved_j[icnt]);
-            add_to_heap(saved_j[icnt], dis);
+            const auto id = saved_j[icnt];
+            float dis;
+            if (use_rabitq_staged) {
+                const float estimate = qdis.rabitq_distance_1bit(id);
+                rabitq_staged_n_1bit.fetch_add(
+                        1, std::memory_order_relaxed);
+                dis = estimate;
+                if (qdis.rabitq_should_refine(
+                            id, estimate, threshold, hnsw.is_similarity)) {
+                    dis = qdis.rabitq_distance_full(id);
+                    rabitq_staged_n_refine.fetch_add(
+                            1, std::memory_order_relaxed);
+                    ndis++;
+                }
+            } else {
+                dis = qdis(id);
+            }
+            add_to_heap(id, dis);
 
             ndis += 1;
         }

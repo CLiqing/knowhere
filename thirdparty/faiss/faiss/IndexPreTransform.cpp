@@ -348,6 +348,27 @@ struct PreTransformDistanceComputer : DistanceComputer {
         return (*sub_dc)(i);
     }
 
+    bool supports_rabitq_staged() const override {
+        return sub_dc->supports_rabitq_staged();
+    }
+
+    float rabitq_distance_1bit(idx_t i) override {
+        return sub_dc->rabitq_distance_1bit(i);
+    }
+
+    float rabitq_distance_full(idx_t i) override {
+        return sub_dc->rabitq_distance_full(i);
+    }
+
+    bool rabitq_should_refine(
+            idx_t i,
+            float estimate,
+            float threshold,
+            bool is_similarity) const override {
+        return sub_dc->rabitq_should_refine(
+                i, estimate, threshold, is_similarity);
+    }
+
     void distances_batch_4(
             const idx_t idx0,
             const idx_t idx1,

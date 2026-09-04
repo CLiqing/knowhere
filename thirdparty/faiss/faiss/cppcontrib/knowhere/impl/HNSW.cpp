@@ -7,7 +7,11 @@
 
 #include <faiss/cppcontrib/knowhere/impl/HNSW.h>
 
+#include <atomic>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cinttypes>
 #include <string>
 
 #include <faiss/impl/AuxIndexStructures.h>
@@ -658,6 +662,39 @@ namespace {
 using MinimaxHeap = HNSW::MinimaxHeap;
 using Node = HNSW::Node;
 using C = HNSW::C;
+
+std::atomic<uint64_t> staged_n_1bit{0};
+std::atomic<uint64_t> staged_n_refine{0};
+std::atomic<uint64_t> staged_search_calls{0};
+std::atomic<uint64_t> staged_supported_calls{0};
+
+struct StagedStatsReporter {
+    ~StagedStatsReporter() {
+        if (std::getenv("KNOWHERE_RABITQ_STAGED") == nullptr) {
+            return;
+        }
+        const auto n_1bit = staged_n_1bit.load(std::memory_order_relaxed);
+        const auto n_refine = staged_n_refine.load(std::memory_order_relaxed);
+        const auto search_calls =
+                staged_search_calls.load(std::memory_order_relaxed);
+        const auto supported_calls =
+                staged_supported_calls.load(std::memory_order_relaxed);
+        std::fprintf(
+                stderr,
+                "RABITQ_STAGED_CONTRIB_STATS n_1bit=%" PRIu64
+                " n_refine=%" PRIu64 " refine_ratio=%.8f"
+                " search_calls=%" PRIu64 " supported_calls=%" PRIu64 "\n",
+                n_1bit,
+                n_refine,
+                n_1bit == 0 ? 0.0
+                             : static_cast<double>(n_refine) /
+                                static_cast<double>(n_1bit),
+                search_calls,
+                supported_calls);
+    }
+};
+
+StagedStatsReporter staged_stats_reporter;
 /** Do a BFS on the candidates list. Templated on the concrete VisitedTable
  * type so get/set/prefetch stay inline in the hot loop.
  */
@@ -680,6 +717,16 @@ int search_from_candidates_fixVT(
                                : hnsw.check_relative_distance;
     int efSearch = params ? params->efSearch : hnsw.efSearch;
     const IDSelector* sel = params ? params->sel : nullptr;
+    const bool staged_requested =
+            level == 0 && std::getenv("KNOWHERE_RABITQ_STAGED") != nullptr;
+    if (staged_requested) {
+        staged_search_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    const bool staged_supported = qdis.supports_rabitq_staged();
+    if (staged_requested && staged_supported) {
+        staged_supported_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    const bool use_rabitq_staged = staged_requested && staged_supported;
 
     C::T threshold = res.threshold;
     for (int i = 0; i < candidates.size(); i++) {
@@ -778,19 +825,35 @@ int search_from_candidates_fixVT(
             n_buffered += 1;
 
             if (n_buffered == 4) {
-                float dis[4];
-                qdis.distances_batch_4(
-                        buffered_ids[0],
-                        buffered_ids[1],
-                        buffered_ids[2],
-                        buffered_ids[3],
-                        dis[0],
-                        dis[1],
-                        dis[2],
-                        dis[3]);
+                if (use_rabitq_staged) {
+                    for (size_t id4 = 0; id4 < 4; id4++) {
+                        const auto id = buffered_ids[id4];
+                        const float estimate = qdis.rabitq_distance_1bit(id);
+                        staged_n_1bit.fetch_add(1, std::memory_order_relaxed);
+                        float dis = estimate;
+                        if (qdis.rabitq_should_refine(
+                                    id, estimate, threshold, false)) {
+                            dis = qdis.rabitq_distance_full(id);
+                            staged_n_refine.fetch_add(
+                                    1, std::memory_order_relaxed);
+                        }
+                        add_to_heap(id, dis);
+                    }
+                } else {
+                    float dis[4];
+                    qdis.distances_batch_4(
+                            buffered_ids[0],
+                            buffered_ids[1],
+                            buffered_ids[2],
+                            buffered_ids[3],
+                            dis[0],
+                            dis[1],
+                            dis[2],
+                            dis[3]);
 
-                for (size_t id4 = 0; id4 < 4; id4++) {
-                    add_to_heap(buffered_ids[id4], dis[id4]);
+                    for (size_t id4 = 0; id4 < 4; id4++) {
+                        add_to_heap(buffered_ids[id4], dis[id4]);
+                    }
                 }
 
                 n_buffered = 0;
@@ -799,8 +862,20 @@ int search_from_candidates_fixVT(
 
         // process leftovers
         for (size_t icnt = 0; icnt < n_buffered; icnt++) {
-            float dis = qdis(buffered_ids[icnt]);
-            add_to_heap(buffered_ids[icnt], dis);
+            const auto id = buffered_ids[icnt];
+            float dis;
+            if (use_rabitq_staged) {
+                const float estimate = qdis.rabitq_distance_1bit(id);
+                staged_n_1bit.fetch_add(1, std::memory_order_relaxed);
+                dis = estimate;
+                if (qdis.rabitq_should_refine(id, estimate, threshold, false)) {
+                    dis = qdis.rabitq_distance_full(id);
+                    staged_n_refine.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else {
+                dis = qdis(id);
+            }
+            add_to_heap(id, dis);
         }
 
         nstep++;

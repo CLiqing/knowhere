@@ -13,6 +13,7 @@
 #include <faiss/MetricType.h>
 #include <faiss/impl/DistanceComputer.h>
 #include <faiss/impl/Quantizer.h>
+#include <faiss/impl/RaBitQUtils.h>
 
 namespace faiss {
 
@@ -138,6 +139,36 @@ struct RaBitQDistanceComputer : FlatCodesDistanceComputer {
 
     // Compute full multi-bit distance (accurate)
     virtual float distance_to_code_full(const uint8_t* code) = 0;
+
+    bool supports_rabitq_staged() const final {
+        return nb_bits >= 2;
+    }
+
+    float rabitq_distance_1bit(idx_t i) final {
+        return distance_to_code_1bit(codes + i * code_size);
+    }
+
+    float rabitq_distance_full(idx_t i) final {
+        return distance_to_code_full(codes + i * code_size);
+    }
+
+    bool rabitq_should_refine(
+            idx_t i,
+            float estimate,
+            float threshold,
+            bool is_similarity) const final {
+        const uint8_t* code = codes + i * code_size;
+        const size_t base_code_size = (d * nb_bits + 7) / 8;
+        const auto* factors =
+                reinterpret_cast<const rabitq_utils::SignBitFactorsWithError*>(
+                        code + base_code_size);
+        return rabitq_utils::should_refine_candidate(
+                estimate,
+                factors->f_error,
+                g_error,
+                threshold,
+                is_similarity);
+    }
 
     virtual void set_centroid(const float* centroid_in) {
         centroid = centroid_in;
