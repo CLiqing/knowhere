@@ -667,8 +667,8 @@ inline float ip_1exbit_avx512(
 // AVX2+BMI2 bitplane kernel used as fallback for ex_bits >= 2.
 // AVX512 TU has AVX2 available. BMI2 guarded separately since
 // VIA Eden X4 has AVX2 without BMI2.
-#ifdef __BMI2__
-inline float ip_bitplane_avx2(
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((target("bmi2"), noinline)) float ip_bitplane_avx2(
         const uint8_t* __restrict sign_bits,
         const uint8_t* __restrict ex_code,
         const float* __restrict rotated_q,
@@ -737,8 +737,8 @@ float compute_inner_product<SIMDLevel::AVX512>(
         return ip_1exbit_avx512(sign_bits, ex_code, rotated_q, d, cb);
     }
 
-#ifdef __BMI2__
-    if (ex_bits <= 7) {
+#if defined(__GNUC__) && defined(__x86_64__)
+    if (ex_bits <= 7 && __builtin_cpu_supports("bmi2")) {
         return ip_bitplane_avx2(sign_bits, ex_code, rotated_q, d, ex_bits, cb);
     }
 #endif

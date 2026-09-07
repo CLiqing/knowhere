@@ -13,6 +13,7 @@
 
 #include <faiss/MetricType.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
+#include <faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h>
 #include <faiss/cppcontrib/knowhere/MetricType.h>
 #include <faiss/cppcontrib/knowhere/impl/Bruteforce.h>
 #include <faiss/cppcontrib/knowhere/impl/HNSW.h>
@@ -118,7 +119,9 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    const auto* split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
+    std::unique_ptr<faiss::DistanceComputer> dis(split ? split->get_staged_distance_computer()
+                                                    : storage_distance_computer(index_hnsw->storage));
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {

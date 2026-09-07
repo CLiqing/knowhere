@@ -195,6 +195,53 @@ class FaissHnswPqConfig : public FaissHnswConfig {
     }
 };
 
+class FaissHnswRaBitQConfig : public FaissHnswConfig {
+ public:
+    // Number of bits per database vector dimension.
+    CFG_INT rbq_bits;
+    // Coarse estimator query precision, stored with the index in this demo.
+    CFG_INT rbq_bits_query;
+
+    KNOWHERE_DECLARE_CONFIG(FaissHnswRaBitQConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits)
+            .description("number of RaBitQ bits per database vector dimension")
+            .set_default(1)
+            .set_range(1, 8)
+            .for_train()
+            .for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits_query)
+            .description("query bits for the split RaBitQ coarse estimator; 0 uses FP32")
+            .set_default(4)
+            .set_range(0, 8)
+            .for_train()
+            .for_static();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto base_status = FaissHnswConfig::CheckAndAdjust(param_type, err_msg);
+        if (base_status != Status::success) {
+            return base_status;
+        }
+
+        const auto metric = str_to_lower(metric_type.value_or(knowhere::metric::L2));
+        if (metric != "l2" && metric != "ip" && metric != "cosine") {
+            return HandleError(err_msg, "HNSW_RABITQ only supports L2, IP and COSINE metrics",
+                               Status::invalid_metric_type);
+        }
+
+
+        if (param_type == PARAM_TYPE::TRAIN && refine_type.has_value() &&
+            !WhetherAcceptableRefineType(refine_type.value())) {
+            return HandleError(err_msg,
+                               "invalid refine type : " + refine_type.value() +
+                                   ", optional types are [sq4u, sq6, sq8, fp16, bf16, fp32, flat]",
+                               Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
+
 class FaissHnswPrqConfig : public FaissHnswConfig {
  public:
     // number of subquantizer splits
