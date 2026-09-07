@@ -10,6 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
+#include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
 
 #include <faiss/MetricType.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
@@ -102,6 +103,17 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         FAISS_THROW_IF_NOT_MSG(params, "params type invalid");
 
         kAlpha = params->kAlpha;
+    }
+
+    const auto* demo_split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
+    if (demo_split && std::getenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL")) {
+        const auto* bitset_sel = params ? dynamic_cast<const knowhere::BitsetViewIDSelector*>(params->sel) : nullptr;
+        FAISS_THROW_IF_NOT_MSG(!params || ((!params->sel || (bitset_sel && bitset_sel->bitset_view.empty())) &&
+                                         !params->feder), "native RaBitQ demo requires unfiltered KNN without feder");
+        native_split_demo::search(*demo_split, n, x, k, distances, labels,
+                                  params ? params->efSearch : hnsw.efSearch,
+                                  params ? params->check_relative_distance : hnsw.check_relative_distance);
+        return;
     }
 
     // set up hnsw_stats
@@ -204,6 +216,14 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
             }
         }
 
+        if (std::getenv("KNOWHERE_RBQ_TRACE_COUNTS")) {
+            if (auto* staged = dynamic_cast<faiss::cppcontrib::knowhere::StagedDistanceComputer*>(dis.get())) {
+                std::fprintf(stderr,
+                    "RBQ_COUNTS legacy ef=%d estimate=%zu refine=%zu expanded_total=%zu upper_full=%zu\n",
+                    params ? params->efSearch : hnsw.efSearch, staged->estimate_count, staged->refine_count,
+                    local_stats.nhops, local_stats.ndis - staged->estimate_count + 1);
+            }
+        }
         // record some statistics
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         knowhere::knowhere_hnsw_search_hops.Observe(local_stats.nhops);

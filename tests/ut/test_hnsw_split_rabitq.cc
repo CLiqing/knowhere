@@ -13,6 +13,42 @@
 #include <faiss/impl/RaBitQUtils.h>
 #include <faiss/utils/distances.h>
 #include "catch2/catch_approx.hpp"
+#include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
+
+TEST_CASE("Native split traversal retains all results when k covers the graph", "[hnsw_split_native]") {
+    namespace fk = faiss::cppcontrib::knowhere;
+    constexpr int n = 128, dim = 65;
+    auto base = GenDataSet(n, dim, 121);
+    auto queries = GenDataSet(4, dim, 122);
+    const auto* x = static_cast<const float*>(base->GetTensor());
+    fk::IndexHNSWFlat fp32(dim, 16, faiss::METRIC_L2);
+    fp32.add(n, x);
+    auto* rq = new faiss::IndexRaBitQ(dim, faiss::METRIC_L2, 8);
+    rq->qb = 4;
+    faiss::IndexPreTransform storage(new faiss::RandomRotationMatrix(dim, dim), rq);
+    storage.own_fields = true;
+    storage.train(n, x);
+    storage.add(n, x);
+    fk::IndexHNSWRaBitQ graph;
+    graph.d = dim; graph.ntotal = n; graph.metric_type = faiss::METRIC_L2;
+    graph.storage = &storage; graph.own_fields = false;
+    graph.hnsw = std::move(fp32.hnsw);
+    std::unique_ptr<faiss::DistanceComputer> full(storage.get_distance_computer());
+    std::vector<float> distances(4 * n);
+    std::vector<faiss::idx_t> labels(4 * n);
+    knowhere::native_split_demo::search(graph, 4,
+        static_cast<const float*>(queries->GetTensor()), n, distances.data(), labels.data(), n, true);
+    for (int q = 0; q < 4; ++q) {
+        full->set_query(static_cast<const float*>(queries->GetTensor()) + q * dim);
+        std::vector<std::pair<float, faiss::idx_t>> expected;
+        for (int i = 0; i < n; ++i) expected.emplace_back((*full)(i), i);
+        std::sort(expected.begin(), expected.end());
+        for (int i = 0; i < n; ++i) {
+            REQUIRE(labels[q * n + i] == expected[i].second);
+            REQUIRE(distances[q * n + i] == Catch::Approx(expected[i].first).margin(1e-5));
+        }
+    }
+}
 
 TEST_CASE("Split staged distances preserve metric and cosine threshold semantics", "[hnsw_split_rabitq]") {
     namespace fk = faiss::cppcontrib::knowhere;
