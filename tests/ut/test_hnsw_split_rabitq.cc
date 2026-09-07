@@ -14,6 +14,33 @@
 #include <faiss/utils/distances.h>
 #include "catch2/catch_approx.hpp"
 #include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
+#include <faiss/utils/rabitq_simd.h>
+
+TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_split_native]") {
+#if defined(__GNUC__) && defined(__x86_64__)
+    if (!__builtin_cpu_supports("avx512f") || !__builtin_cpu_supports("avx512bw") ||
+        !__builtin_cpu_supports("avx512dq") || !__builtin_cpu_supports("avx512vl") ||
+        !__builtin_cpu_supports("bmi2")) return;
+    for (size_t d : {8, 16, 23, 24, 31, 65, 200, 768, 1536}) {
+        for (size_t ex : {2, 3, 4, 5, 6, 7}) {
+            for (int seed = 1; seed <= 3; ++seed) {
+                CAPTURE(d, ex, seed);
+                std::vector<uint8_t> signs((d+7)/8), extra((d*ex+7)/8+32);
+                std::vector<float> query(d);
+                for (size_t i=0; i<signs.size(); ++i) signs[i]=(i*73+seed*19)%256;
+                for (size_t i=0; i<extra.size(); ++i) extra[i]=(i*131+seed*37)%256;
+                for (size_t i=0; i<d; ++i) query[i]=std::sin(float(i)*.37f+seed);
+                const float cb=-float(1u<<ex)+.5f;
+                const float ref=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::NONE>(
+                    signs.data(),extra.data(),query.data(),d,ex,cb);
+                const float actual=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX512>(
+                    signs.data(),extra.data(),query.data(),d,ex,cb);
+                REQUIRE(actual == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
+            }
+        }
+    }
+#endif
+}
 
 TEST_CASE("Native split traversal retains all results when k covers the graph", "[hnsw_split_native]") {
     namespace fk = faiss::cppcontrib::knowhere;
