@@ -67,7 +67,8 @@ struct IndexHNSWRaBitQ : IndexHNSW {
 
     const faiss::IndexRaBitQ* rabitq_index() const;
 
-    faiss::DistanceComputer* get_staged_distance_computer() const;
+    faiss::DistanceComputer* get_staged_distance_computer(
+            const faiss::RaBitQSearchParameters* params = nullptr) const;
 
     /** Validate the complete runtime/storage shape and serialized invariants.
      * Throws FaissException on malformed state. */

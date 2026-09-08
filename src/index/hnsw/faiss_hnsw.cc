@@ -48,6 +48,7 @@
 #include "index/hnsw/impl/IndexBruteForceWrapper.h"
 #include "index/hnsw/impl/IndexConditionalWrapper.h"
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
+#include "index/hnsw/impl/RaBitQSearchParameters.h"
 #include "index/hnsw/impl/IndexWrapperCosine.h"
 #include "index/refine/refine_utils.h"
 #include "io/memory_io.h"
@@ -797,16 +798,6 @@ get_index_data_format(const faiss::Index* index) {
     return std::nullopt;
 }
 
-// cloned from IndexHNSW.cpp
-faiss::DistanceComputer*
-storage_distance_computer(const faiss::Index* storage) {
-    if (faiss::cppcontrib::knowhere::is_similarity_metric(storage->metric_type)) {
-        return new faiss::NegativeDistanceComputer(storage->get_distance_computer());
-    } else {
-        return storage->get_distance_computer();
-    }
-}
-
 // there are chances that each partition split by scalar distribution is too small that we could not even train pq on it
 // bcz 256 points are needed for a 8-bit pq training in faiss
 // combine some small partitions to get a bigger one
@@ -899,7 +890,8 @@ class FaissHnswIterator : public IndexIterator {
                       const std::shared_ptr<std::vector<uint32_t>>& labels_in, std::unique_ptr<float[]>&& query_in,
                       const BitsetView& bitset_in, const int32_t ef_in, bool larger_is_closer,
                       const float refine_ratio = 0.5f, const std::vector<uint32_t>& label_to_internal_offset_in = {},
-                      const uint32_t mv_base_offset_in = 0, bool use_knowhere_search_pool = true)
+                      const uint32_t mv_base_offset_in = 0, bool use_knowhere_search_pool = true,
+                      const SearchParametersHNSWWrapper* storage_params = nullptr)
         : IndexIterator(larger_is_closer, use_knowhere_search_pool, refine_ratio),
           index{index_in},
           labels{labels_in},
@@ -933,7 +925,11 @@ class FaissHnswIterator : public IndexIterator {
             workspace.hnsw = &index_hnsw->hnsw;
 
             // wrap a sign, if needed
-            workspace.qdis = std::unique_ptr<faiss::DistanceComputer>(storage_distance_computer(index_hnsw));
+            workspace.qdis.reset(storage_params ? storage_params->storage_distance_computer(index_hnsw)
+                                                : index_hnsw->get_distance_computer());
+            if (larger_is_closer) {
+                workspace.qdis.reset(new faiss::NegativeDistanceComputer(workspace.qdis.release()));
+            }
 
             if (refine_ratio != 0) {
                 // the refine is needed
@@ -973,7 +969,11 @@ class FaissHnswIterator : public IndexIterator {
             workspace.hnsw = &index_hnsw->hnsw;
 
             // wrap a sign, if needed
-            workspace.qdis = std::unique_ptr<faiss::DistanceComputer>(storage_distance_computer(index_hnsw));
+            workspace.qdis.reset(storage_params ? storage_params->storage_distance_computer(index_hnsw)
+                                                : index_hnsw->get_distance_computer());
+            if (larger_is_closer) {
+                workspace.qdis.reset(new faiss::NegativeDistanceComputer(workspace.qdis.release()));
+            }
         }
 
         // set query
@@ -1168,6 +1168,11 @@ class FaissHnswIterator : public IndexIterator {
 //
 class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
  public:
+    virtual std::unique_ptr<knowhere::SearchParametersHNSWWrapper>
+    CreateSearchParameters(const FaissHnswConfig&) const {
+        return std::make_unique<knowhere::SearchParametersHNSWWrapper>();
+    }
+
     BaseFaissRegularIndexHNSWNode(const int32_t& version, const Object& object, DataFormatEnum data_format_in)
         : BaseFaissRegularIndexNode(version, object), data_format{data_format_in} {
     }
@@ -1372,7 +1377,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         const auto rows = dataset->GetRows();
         const auto* data = dataset->GetTensor();
 
-        const auto hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
+        const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
         const auto k = hnsw_cfg.k.value();
 
         BitsetView bitset(bitset_);
@@ -1425,7 +1430,8 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         faiss::Index* index_wrapper_ptr = index_wrapper.get();
 
         // set up faiss search parameters
-        knowhere::SearchParametersHNSWWrapper hnsw_search_params;
+        auto search_parameters = CreateSearchParameters(hnsw_cfg);
+        auto& hnsw_search_params = *search_parameters;
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
         }
@@ -1673,7 +1679,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         const auto rows = dataset->GetRows();
         const auto* data = dataset->GetTensor();
 
-        const auto hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
+        const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
         BitsetView bitset(bitset_);
         auto index_id = getIndexToSearchByScalarInfo(bitset);
         if (index_id < 0) {
@@ -1718,7 +1724,8 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         faiss::Index* index_wrapper_ptr = index_wrapper.get();
 
         // set up faiss search parameters
-        knowhere::SearchParametersHNSWWrapper hnsw_search_params;
+        auto search_parameters = CreateSearchParameters(hnsw_cfg);
+        auto& hnsw_search_params = *search_parameters;
 
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
@@ -2006,6 +2013,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         const bool larger_is_closer = (IsMetricType(hnsw_cfg.metric_type.value(), knowhere::metric::IP) || is_cosine);
 
         const auto ef = hnsw_cfg.ef.value_or(kIteratorSeedEf);
+        const auto storage_search_params = CreateSearchParameters(hnsw_cfg);
         const auto& id_map = GetIdMap();
         const auto* result_id_map = SearchResultIdMap(id_map);
 
@@ -2046,7 +2054,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                 auto it = std::make_shared<FaissHnswIterator>(
                     indexes[index_id], labels.empty() ? nullptr : labels[index_id], std::move(cur_query), bitset, ef,
                     larger_is_closer, iterator_refine_ratio, label_to_internal_offset, mv_base_offset,
-                    use_knowhere_search_pool);
+                    use_knowhere_search_pool, storage_search_params.get());
                 it->SetResultIdMap(result_id_map);
                 // store
                 vec[i] = it;
@@ -3052,6 +3060,13 @@ class BaseFaissRegularIndexHNSWPQNodeTemplate : public BaseFaissRegularIndexHNSW
 // immutable.
 class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode {
  public:
+    std::unique_ptr<knowhere::SearchParametersHNSWWrapper>
+    CreateSearchParameters(const FaissHnswConfig& config) const override {
+        auto params = std::make_unique<knowhere::SearchParametersHNSWRaBitQWrapper>();
+        params->storage_params.qb = dynamic_cast<const FaissHnswRaBitQConfig&>(config).rbq_bits_query.value_or(4);
+        return params;
+    }
+
     BaseFaissRegularIndexHNSWRaBitQNode(const int32_t& version, const Object& object, DataFormatEnum data_format)
         : BaseFaissRegularIndexHNSWNode(version, object, data_format) {
     }
@@ -3128,7 +3143,7 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
             const auto rbq_bits = static_cast<uint8_t>(hnsw_cfg.rbq_bits.value());
             auto rabitq_index = std::make_unique<faiss::IndexRaBitQ>(dim, metric.value(), rbq_bits);
             // Query quantization accelerates the coarse estimate; full scoring uses FP32.
-            rabitq_index->qb = hnsw_cfg.rbq_bits_query.value_or(4);
+            rabitq_index->qb = 4;
             rabitq_index->centered = false;
             auto rotation = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
             std::unique_ptr<faiss::IndexPreTransform> transformed_rabitq;

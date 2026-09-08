@@ -10,7 +10,8 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
-#include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
+#include <faiss/cppcontrib/knowhere/impl/RaBitQSearch.h>
+#include "index/hnsw/impl/RaBitQSearchParameters.h"
 
 #include <faiss/MetricType.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
@@ -40,6 +41,7 @@
 #endif
 
 namespace knowhere {
+namespace native_split_demo = faiss::cppcontrib::knowhere::rabitq_search;
 
 /**************************************************************
  * Utilities
@@ -105,16 +107,28 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         kAlpha = params->kAlpha;
     }
 
-    // Opt-in split traversal supports L2 and similarity/COSINE output scaling.
-    // Filtering and feder remain on the existing fully featured searcher.
+    const auto* rbq_params = dynamic_cast<const SearchParametersHNSWRaBitQWrapper*>(params);
+    // Use the optimized multi-bit path only when its selector/visitor contract
+    // is satisfied. RBQ1, filtering and feder use the compatible searcher below.
     const auto* demo_split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
-    if (demo_split && std::getenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL")) {
-        const auto* bitset_sel = params ? dynamic_cast<const knowhere::BitsetViewIDSelector*>(params->sel) : nullptr;
-        FAISS_THROW_IF_NOT_MSG(!params || ((!params->sel || (bitset_sel && bitset_sel->bitset_view.empty())) &&
-                                         !params->feder), "native RaBitQ demo requires unfiltered KNN without feder");
+    const auto* bitset_sel = params ? dynamic_cast<const knowhere::BitsetViewIDSelector*>(params->sel) : nullptr;
+    const bool unfiltered = !params || !params->sel || (bitset_sel && bitset_sel->bitset_view.empty());
+    if (demo_split && demo_split->rabitq_index()->rabitq.nb_bits > 1 &&
+        unfiltered && (!params || !params->feder)) {
         native_split_demo::search(*demo_split, n, x, k, distances, labels,
                                   params ? params->efSearch : hnsw.efSearch,
-                                  params ? params->check_relative_distance : hnsw.check_relative_distance);
+                                  params ? params->check_relative_distance : hnsw.check_relative_distance,
+                                  rbq_params ? &rbq_params->storage_params : nullptr,
+                                  [&](const native_split_demo::Counts& counts) {
+                                      const size_t hops = counts.expanded + counts.upper_expanded;
+#if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
+                                      knowhere::knowhere_hnsw_search_hops.Observe(hops);
+#endif
+                                      if (params && params->hnsw_stats) {
+                                          params->hnsw_stats->combine({.n1 = 1, .n2 = size_t(counts.exhausted),
+                                              .ndis = counts.estimate + counts.upper_full, .nhops = hops});
+                                      }
+                                  });
         if (faiss::cppcontrib::knowhere::is_similarity_metric(index->metric_type)) {
             for (idx_t i = 0; i < k * n; ++i) distances[i] = -distances[i];
         }
@@ -137,7 +151,8 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
 
     // create a distance computer
     const auto* split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
-    std::unique_ptr<faiss::DistanceComputer> dis(split ? split->get_staged_distance_computer()
+    std::unique_ptr<faiss::DistanceComputer> dis(split ? split->get_staged_distance_computer(
+                                                        rbq_params ? &rbq_params->storage_params : nullptr)
                                                     : storage_distance_computer(index_hnsw->storage));
 
     // no parallelism by design
@@ -299,7 +314,11 @@ IndexHNSWWrapper::range_search(idx_t n, const float* __restrict x, float radius_
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
+    std::unique_ptr<faiss::DistanceComputer> dis(params ? params->storage_distance_computer(index_hnsw)
+                                                     : index_hnsw->get_distance_computer());
+    if (faiss::cppcontrib::knowhere::is_similarity_metric(index_hnsw->metric_type)) {
+        dis.reset(new faiss::NegativeDistanceComputer(dis.release()));
+    }
 
     // radius
     float radius = radius_in;

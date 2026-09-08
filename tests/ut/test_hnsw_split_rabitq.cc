@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <future>
 #include "catch2/catch_test_macros.hpp"
 #include "knowhere/comp/knowhere_config.h"
 #include "knowhere/index/index_factory.h"
@@ -13,9 +14,11 @@
 #include <faiss/impl/RaBitQUtils.h>
 #include <faiss/utils/distances.h>
 #include "catch2/catch_approx.hpp"
-#include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
+#include <faiss/cppcontrib/knowhere/impl/RaBitQSearch.h>
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include <faiss/utils/rabitq_simd.h>
+
+namespace rabitq_search = faiss::cppcontrib::knowhere::rabitq_search;
 
 TEST_CASE("Split qb4 SIMD matches scalar including masked tails", "[hnsw_split_native]") {
 #if defined(__GNUC__) && defined(__x86_64__)
@@ -40,11 +43,11 @@ TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_
     if (!__builtin_cpu_supports("avx512f") || !__builtin_cpu_supports("avx512bw") ||
         !__builtin_cpu_supports("avx512dq") || !__builtin_cpu_supports("avx512vl") ||
         !__builtin_cpu_supports("bmi2")) return;
-    for (size_t d : {8, 16, 23, 24, 31, 65, 200, 768, 1536}) {
-        for (size_t ex : {2, 3, 4, 5, 6, 7}) {
+    for (size_t d : {1, 7, 8, 15, 16, 23, 24, 31, 65, 200, 768, 1536}) {
+        for (size_t ex : {2, 3, 4, 5, 6, 7, 8}) {
             for (int seed = 1; seed <= 3; ++seed) {
                 CAPTURE(d, ex, seed);
-                std::vector<uint8_t> signs((d+7)/8), extra((d*ex+7)/8+32);
+                std::vector<uint8_t> signs((d+7)/8), extra((d*ex+7)/8+(ex==8 ? 0 : 32));
                 std::vector<float> query(d);
                 for (size_t i=0; i<signs.size(); ++i) signs[i]=(i*73+seed*19)%256;
                 for (size_t i=0; i<extra.size(); ++i) extra[i]=(i*131+seed*37)%256;
@@ -55,6 +58,9 @@ TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_
                 const float actual=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX512>(
                     signs.data(),extra.data(),query.data(),d,ex,cb);
                 REQUIRE(actual == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
+                const float avx2=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX2>(
+                    signs.data(),extra.data(),query.data(),d,ex,cb);
+                REQUIRE(avx2 == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
             }
         }
     }
@@ -92,19 +98,13 @@ TEST_CASE("Native split traversal retains all results when k covers the graph", 
     std::unique_ptr<faiss::DistanceComputer> full(storage.get_distance_computer());
     std::vector<float> distances(4 * n);
     std::vector<faiss::idx_t> labels(4 * n);
-    knowhere::native_split_demo::search(graph, 4,
+    rabitq_search::search(graph, 4,
         static_cast<const float*>(queries->GetTensor()), n, distances.data(), labels.data(), n, true);
     std::vector<float> api_distances(4*n);
     std::vector<faiss::idx_t> api_labels(4*n);
-    const char* previous_env=std::getenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL");
-    const bool had_env=previous_env!=nullptr;
-    const std::string previous_value=had_env ? previous_env : "";
-    setenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL","1",1);
     knowhere::IndexHNSWWrapper api(&graph);
     knowhere::SearchParametersHNSWWrapper params;params.efSearch=n;
     api.search(4,static_cast<const float*>(queries->GetTensor()),n,api_distances.data(),api_labels.data(),&params);
-    if(had_env)setenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL",previous_value.c_str(),1);
-    else unsetenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL");
     for(int i=0;i<4*n;++i){
         REQUIRE(api_labels[i]==labels[i]);
         REQUIRE(api_distances[i]==Catch::Approx((similarity ? -1.f : 1.f)*distances[i]).margin(1e-5));
@@ -240,6 +240,202 @@ TEST_CASE("Split HNSW RaBitQ metrics and serialized search", "[hnsw_split_rabitq
             for (int i=0;i<320;++i) {
                 REQUIRE(before.value()->GetIds()[i] == after.value()->GetIds()[i]);
                 REQUIRE(before.value()->GetDistance()[i] == after.value()->GetDistance()[i]);
+            }
+        }
+    }
+}
+
+TEST_CASE("Split public search supports all database and query bit widths", "[hnsw_split_rabitq]") {
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto base = GenDataSet(128, 33, 731);
+    auto query = GenDataSet(3, 33, 732);
+    for (const auto* metric : {"L2", "IP", "COSINE"}) {
+        for (int bits = 1; bits <= 9; ++bits) {
+            CAPTURE(metric, bits);
+            knowhere::Json config = {{"dim",33}, {"metric_type",metric}, {"k",10},
+                {"M",8}, {"efConstruction",64}, {"ef",64}};
+            // Also exercise the public default (RBQ1).
+            if (bits != 1) config["rbq_bits"] = bits;
+            auto index = knowhere::IndexFactory::Instance().Create<knowhere::fp32>(
+                knowhere::IndexEnum::INDEX_HNSW_RABITQ, version).value();
+            REQUIRE(index.Build(base, config) == knowhere::Status::success);
+            knowhere::BinarySet original;
+            REQUIRE(index.Serialize(original) == knowhere::Status::success);
+            knowhere::DataSetPtr unquantized;
+            for (int qb = 0; qb <= 8; ++qb) {
+                CAPTURE(qb);
+                config["rbq_bits_query"] = qb;
+                auto result = index.Search(query, config, nullptr);
+                REQUIRE(result.has_value());
+                if (qb == 0) unquantized = result.value();
+                if (qb == 1 && bits == 1) {
+                    // Detect accidental parameter slicing/default-only routing.
+                    bool different = false;
+                    for (int i = 0; i < 30; ++i) {
+                        different |= result.value()->GetIds()[i] != unquantized->GetIds()[i] ||
+                                     result.value()->GetDistance()[i] != unquantized->GetDistance()[i];
+                    }
+                    REQUIRE(different);
+                }
+                for (int i = 0; i < 30; ++i) {
+                    REQUIRE(result.value()->GetIds()[i] >= 0);
+                    REQUIRE(std::isfinite(result.value()->GetDistance()[i]));
+                }
+                for (int excluded : {16, 124, 128}) {
+                    CAPTURE(excluded);
+                    std::vector<uint8_t> mask(16, 0);
+                    for (int i=0; i<excluded; ++i) mask[i/8] |= uint8_t(1u << (i%8));
+                    auto filtered = index.Search(query, config, knowhere::BitsetView(mask.data(),128));
+                    REQUIRE(filtered.has_value());
+                    for (int i=0; i<30; ++i) {
+                        const auto id = filtered.value()->GetIds()[i];
+                        REQUIRE((id == -1 || (id >= excluded && id < 128)));
+                    }
+                }
+            }
+            // Request qb never mutates serialized storage defaults or codes.
+            knowhere::BinarySet after;
+            REQUIRE(index.Serialize(after) == knowhere::Status::success);
+            REQUIRE(original.binary_map_.size() == after.binary_map_.size());
+            for (const auto& [name, bin] : original.binary_map_) {
+                const auto copy = after.GetByName(name);
+                REQUIRE(bin->size == copy->size);
+                REQUIRE(std::memcmp(bin->data.get(), copy->data.get(), bin->size) == 0);
+            }
+            for (int invalid : {-1, 9}) {
+                config["rbq_bits_query"] = invalid;
+                REQUIRE_FALSE(index.Search(query, config, nullptr).has_value());
+            }
+        }
+    }
+}
+
+TEST_CASE("Split request qb survives refine range iterator and concurrent search", "[hnsw_split_rabitq]") {
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto base = GenDataSet(256, 33, 833);
+    auto query = GenDataSet(1, 33, 834);
+    for (const auto* metric : {"L2", "IP", "COSINE"}) {
+        for (bool refine : {false, true}) {
+            CAPTURE(metric, refine);
+            knowhere::Json config = {{"dim",33}, {"metric_type",metric}, {"k",10},
+                {"M",8}, {"efConstruction",64}, {"ef",128}, {"rbq_bits",9}};
+            if (refine) {
+                config["refine"] = true;
+                config["refine_type"] = "fp16";
+                config["refine_k"] = 1.5;
+            }
+            auto index = knowhere::IndexFactory::Instance().Create<knowhere::fp32>(
+                knowhere::IndexEnum::INDEX_HNSW_RABITQ, version).value();
+            REQUIRE(index.Build(base, config) == knowhere::Status::success);
+            std::vector<knowhere::DataSetPtr> references;
+            std::vector<std::future<knowhere::DataSetPtr>> jobs;
+            for (int qb : {0, 4, 8}) {
+                auto request = config;
+                request["rbq_bits_query"] = qb;
+                auto result = index.Search(query, request, nullptr);
+                REQUIRE(result.has_value());
+                references.push_back(result.value());
+                jobs.push_back(std::async(std::launch::async, [&, request] {
+                    return index.Search(query, request, nullptr).value();
+                }));
+                auto iterators = index.AnnIterator(query, request, nullptr);
+                REQUIRE(iterators.has_value());
+                auto& it = iterators.value()[0];
+                for (int n = 0; n < 10; ++n) {
+                    REQUIRE(it->HasNext().value());
+                    const auto [id, distance] = it->Next().value();
+                    REQUIRE(id >= 0);
+                    REQUIRE(id < 256);
+                    REQUIRE(std::isfinite(distance));
+                }
+                request["radius"] = std::string(metric) == "L2" ? 1e6 : -1e6;
+                auto range = index.RangeSearch(query, request, nullptr);
+                REQUIRE(range.has_value());
+                REQUIRE(range.value()->GetLims()[1] > 0);
+                request["trace_visit"] = true;
+                REQUIRE(index.Search(query, request, nullptr).has_value());
+            }
+            for (size_t j = 0; j < jobs.size(); ++j) {
+                const auto result = jobs[j].get();
+                for (int i = 0; i < 10; ++i) {
+                    REQUIRE(result->GetIds()[i] == references[j]->GetIds()[i]);
+                    REQUIRE(result->GetDistance()[i] == references[j]->GetDistance()[i]);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Split RBQ9 supports floating input formats and loaded request parameters", "[hnsw_split_rabitq]") {
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto base = GenDataSet(128, 33, 913);
+    auto query = GenDataSet(2, 33, 914);
+    auto* base_values = const_cast<float*>(static_cast<const float*>(base->GetTensor()));
+    auto* query_values = const_cast<float*>(static_cast<const float*>(query->GetTensor()));
+    for (int i=0; i<128*33; ++i) base_values[i] -= 50.f;
+    for (int i=0; i<2*33; ++i) query_values[i] -= 50.f;
+    std::fill_n(base_values,33,0.f);
+    std::fill_n(query_values,33,0.f);
+    auto exercise = [&](auto tag) {
+        using T = decltype(tag);
+        auto typed_base = knowhere::data_type_conversion<float, T>(*base);
+        auto typed_query = knowhere::data_type_conversion<float, T>(*query);
+        for (const auto* metric : {"L2", "IP", "COSINE"}) {
+            CAPTURE(metric, sizeof(T));
+            knowhere::Json config = {{"dim",33}, {"metric_type",metric}, {"k",10},
+                {"M",8}, {"efConstruction",64}, {"ef",100}, {"rbq_bits",9}};
+            auto index = knowhere::IndexFactory::Instance().Create<T>(
+                knowhere::IndexEnum::INDEX_HNSW_RABITQ, version).value();
+            REQUIRE(index.Build(typed_base, config) == knowhere::Status::success);
+            knowhere::BinarySet binary;
+            REQUIRE(index.Serialize(binary) == knowhere::Status::success);
+            auto loaded = knowhere::IndexFactory::Instance().Create<T>(
+                knowhere::IndexEnum::INDEX_HNSW_RABITQ, version).value();
+            REQUIRE(loaded.Deserialize(binary, config) == knowhere::Status::success);
+            for (int qb : {0, 4, 8}) {
+                config["rbq_bits_query"] = qb;
+                auto a = index.Search(typed_query, config, nullptr);
+                auto b = loaded.Search(typed_query, config, nullptr);
+                REQUIRE(a.has_value());
+                REQUIRE(b.has_value());
+                for (int i=0; i<20; ++i) {
+                    REQUIRE(a.value()->GetIds()[i] == b.value()->GetIds()[i]);
+                    REQUIRE(std::isfinite(a.value()->GetDistance()[i]));
+                    REQUIRE(a.value()->GetDistance()[i] == b.value()->GetDistance()[i]);
+                }
+            }
+        }
+    };
+    exercise(knowhere::fp32{});
+    exercise(knowhere::fp16{});
+    exercise(knowhere::bf16{});
+}
+
+TEST_CASE("Generic HNSW parameter factory preserves SQ and PQ searches", "[hnsw_split_regression]") {
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto base = GenDataSet(1024, 32, 931);
+    auto query = GenDataSet(2, 32, 932);
+    for (const auto* name : {"HNSW_SQ", "HNSW_PQ"}) {
+        for (const auto* metric : {"L2", "IP", "COSINE"}) {
+            CAPTURE(name, metric);
+            knowhere::Json config = {{"dim",32}, {"metric_type",metric}, {"k",10},
+                {"M",8}, {"efConstruction",64}, {"ef",128}, {"sq_type","SQ8"},
+                {"m",4}, {"nbits",4}};
+            auto index = knowhere::IndexFactory::Instance().Create<knowhere::fp32>(name,version).value();
+            REQUIRE(index.Build(base,config) == knowhere::Status::success);
+            auto result = index.Search(query,config,nullptr);
+            REQUIRE(result.has_value());
+            auto iterators = index.AnnIterator(query,config,nullptr);
+            REQUIRE(iterators.has_value());
+            REQUIRE(iterators.value()[0]->HasNext().value());
+            REQUIRE(std::isfinite(iterators.value()[0]->Next().value().second));
+            std::vector<uint8_t> mask(128,255);
+            mask.back() = 0;
+            auto filtered = index.Search(query,config,knowhere::BitsetView(mask.data(),1024));
+            REQUIRE(filtered.has_value());
+            for (int i=0;i<20;++i) {
+                auto id=filtered.value()->GetIds()[i];
+                REQUIRE((id == -1 || (id >= 1016 && id < 1024)));
             }
         }
     }

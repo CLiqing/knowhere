@@ -27,11 +27,13 @@ struct SplitStagedDistanceComputer final : StagedDistanceComputer {
     float query_inverse_norm = 1;
     std::vector<float> rotated;
 
-    explicit SplitStagedDistanceComputer(const IndexHNSWRaBitQ& index)
+    explicit SplitStagedDistanceComputer(const IndexHNSWRaBitQ& index,
+                                        const faiss::RaBitQSearchParameters* params)
         : rotation(*index.pretransform_index()->chain[0]),
           norms(nullptr), similarity(index.metric_type == METRIC_INNER_PRODUCT),
           rotated(index.d) {
-        auto* raw = index.rabitq_index()->get_FlatCodesDistanceComputer();
+        auto* raw = params ? index.rabitq_index()->get_quantized_distance_computer(params->qb, params->centered)
+                           : index.rabitq_index()->get_FlatCodesDistanceComputer();
         auto* typed = dynamic_cast<faiss::RaBitQDistanceComputer*>(raw);
         if (!typed) { delete raw; FAISS_THROW_MSG("RaBitQ distance computer required"); }
         dc.reset(typed);
@@ -77,8 +79,9 @@ struct SplitStagedDistanceComputer final : StagedDistanceComputer {
 };
 } // namespace
 
-faiss::DistanceComputer* IndexHNSWRaBitQ::get_staged_distance_computer() const {
-    return new SplitStagedDistanceComputer(*this);
+faiss::DistanceComputer* IndexHNSWRaBitQ::get_staged_distance_computer(
+        const faiss::RaBitQSearchParameters* params) const {
+    return new SplitStagedDistanceComputer(*this, params);
 }
 
 IndexPreTransformRaBitQCosine::IndexPreTransformRaBitQCosine() = default;

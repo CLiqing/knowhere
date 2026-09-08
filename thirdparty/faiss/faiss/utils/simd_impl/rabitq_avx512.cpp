@@ -786,6 +786,26 @@ float compute_inner_product<SIMDLevel::AVX512>(
         size_t d,
         size_t ex_bits,
         float cb) {
+    if (ex_bits == 8) {
+        // RBQ9 has one byte per extra code: no bit-plane extraction or BMI2.
+        __m512 acc = _mm512_setzero_ps();
+        const __m512 weight = _mm512_set1_ps(256.f);
+        const __m512 offset = _mm512_set1_ps(cb);
+        size_t i = 0;
+        for (; i + 16 <= d; i += 16) {
+            uint16_t signs;
+            memcpy(&signs, sign_bits + i / 8, sizeof(signs));
+            const __m128i bytes = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(ex_code + i));
+            __m512 recon = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes));
+            recon = _mm512_mask_add_ps(recon, signs, recon, weight);
+            acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(rotated_q + i),
+                    _mm512_add_ps(recon, offset), acc);
+        }
+        return _mm512_reduce_add_ps(acc) +
+                ip_scalar(sign_bits, ex_code, rotated_q, i, d, ex_bits, cb);
+    }
     if (ex_bits == 1) {
         return ip_1exbit_avx512(sign_bits, ex_code, rotated_q, d, cb);
     }

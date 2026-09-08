@@ -357,6 +357,15 @@ inline float ip_scalar(
         size_t ex_bits,
         float cb) {
     float result = 0.0f;
+    if (ex_bits == 8) {
+        // RBQ9 is byte-aligned, including the last dimension. Do not require
+        // trailing factor bytes for the scalar reference or SIMD tail.
+        for (size_t i = start; i < d; ++i) {
+            const int sb = (sign_bits[i / 8] >> (i % 8)) & 1;
+            result += rotated_q[i] * (static_cast<float>((sb << 8) + ex_code[i]) + cb);
+        }
+        return result;
+    }
     const int sign_shift = static_cast<int>(ex_bits);
     const uint64_t code_mask = (1ULL << ex_bits) - 1;
     for (size_t i = start; i < d; i++) {

@@ -199,22 +199,23 @@ class FaissHnswRaBitQConfig : public FaissHnswConfig {
  public:
     // Number of bits per database vector dimension.
     CFG_INT rbq_bits;
-    // Coarse estimator query precision, stored with the index in this demo.
+    // Request-local coarse estimator query precision.
     CFG_INT rbq_bits_query;
 
     KNOWHERE_DECLARE_CONFIG(FaissHnswRaBitQConfig) {
         KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits)
             .description("number of RaBitQ bits per database vector dimension")
             .set_default(1)
-            .set_range(1, 8)
+            .set_range(1, 9)
             .for_train()
             .for_static();
         KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits_query)
             .description("query bits for the split RaBitQ coarse estimator; 0 uses FP32")
             .set_default(4)
             .set_range(0, 8)
-            .for_train()
-            .for_static();
+            .for_search()
+            .for_range_search()
+            .for_iterator();
     }
 
     Status

@@ -2,10 +2,10 @@
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * Licensed under the MIT license in thirdparty/faiss/LICENSE.
  *
- * Diagnostic port of Faiss #5526 (d8a85956) bounded traversal.
+ * Port of Faiss #5526 (d8a85956) bounded traversal.
  * Graph adjacency is read from Knowhere without copying or changing the graph.
  * Extended to L2/IP/COSINE, deliberately limited to unfiltered KNN.
- * Not a production search API.
+ * Callers must dispatch filtered/visitor requests to a compatible searcher.
  */
 #pragma once
 
@@ -18,10 +18,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 
-namespace knowhere::native_split_demo {
+namespace faiss::cppcontrib::knowhere::rabitq_search {
 struct Counts {
     size_t estimate = 0, refine = 0, expanded = 0, upper_full = 0, upper_expanded = 0;
+    bool exhausted = false;
 };
 
 template <class VT>
@@ -114,12 +116,15 @@ Counts search_one(const faiss::cppcontrib::knowhere::HNSW& graph,
         ++stats.expanded;
         if (!relative && stats.expanded > static_cast<size_t>(ef)) break;
     }
+    stats.exhausted = candidates.size() == 0;
     return stats;
 }
 
 inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
                    faiss::idx_t n, const float* x, faiss::idx_t k, float* distances,
-                   faiss::idx_t* labels, int ef, bool relative) {
+                   faiss::idx_t* labels, int ef, bool relative,
+                   const faiss::RaBitQSearchParameters* params = nullptr,
+                   const std::function<void(const Counts&)>& on_query = {}) {
     FAISS_THROW_IF_NOT(index.metric_type == faiss::METRIC_L2 ||
                       index.metric_type == faiss::METRIC_INNER_PRODUCT);
     const bool similarity = index.metric_type == faiss::METRIC_INNER_PRODUCT;
@@ -127,7 +132,8 @@ inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
     const float* norms = cosine ? cosine->get_inverse_l2_norms() : nullptr;
     FAISS_THROW_IF_NOT(index.rabitq_index()->rabitq.nb_bits > 1);
     auto raw = std::unique_ptr<faiss::FlatCodesDistanceComputer>(
-        index.rabitq_index()->get_FlatCodesDistanceComputer());
+        params ? index.rabitq_index()->get_quantized_distance_computer(params->qb, params->centered)
+               : index.rabitq_index()->get_FlatCodesDistanceComputer());
     auto& rq = dynamic_cast<faiss::RaBitQDistanceComputer&>(*raw);
     // Same existing Faiss reusable visited-table implementation as the native
     // benchmark. No new custom thread-local cache is introduced by this demo.
@@ -151,9 +157,10 @@ inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
                                std::max<int>(ef, k), relative, similarity, norms, query_inverse_norm);
         result.end();
         vt.advance();
+        if (on_query) on_query(stats);
         if (counters) std::fprintf(stderr,
             "RBQ_COUNTS native ef=%d estimate=%zu refine=%zu expanded_total=%zu upper_full=%zu\n",
             ef, stats.estimate, stats.refine, stats.expanded + stats.upper_expanded, stats.upper_full);
     }
 }
-} // namespace knowhere::native_split_demo
+} // namespace faiss::cppcontrib::knowhere::rabitq_search
