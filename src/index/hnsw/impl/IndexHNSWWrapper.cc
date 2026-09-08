@@ -105,6 +105,8 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         kAlpha = params->kAlpha;
     }
 
+    // Opt-in split traversal supports L2 and similarity/COSINE output scaling.
+    // Filtering and feder remain on the existing fully featured searcher.
     const auto* demo_split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
     if (demo_split && std::getenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL")) {
         const auto* bitset_sel = params ? dynamic_cast<const knowhere::BitsetViewIDSelector*>(params->sel) : nullptr;
@@ -113,6 +115,9 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         native_split_demo::search(*demo_split, n, x, k, distances, labels,
                                   params ? params->efSearch : hnsw.efSearch,
                                   params ? params->check_relative_distance : hnsw.check_relative_distance);
+        if (faiss::cppcontrib::knowhere::is_similarity_metric(index->metric_type)) {
+            for (idx_t i = 0; i < k * n; ++i) distances[i] = -distances[i];
+        }
         return;
     }
 

@@ -394,6 +394,32 @@ uint64_t bitwise_and_dot_product<SIMDLevel::AVX512>(
     return sum;
 }
 
+#if defined(__GNUC__) && defined(__x86_64__)
+namespace {
+// Ice Lake already has VPOPCNTDQ; requiring the full SPR feature set here
+// unnecessarily selects the shuffle-based fallback. Isolate the optional ISA.
+__attribute__((target("avx512vpopcntdq"), noinline))
+BitwiseAndDotProductResult bitwise_q4_vpopcnt(
+        const uint8_t* query, const uint8_t* data, size_t size) {
+    __m512i dots = _mm512_setzero_si512();
+    __m512i pops = _mm512_setzero_si512();
+    for (size_t off = 0; off < size; off += 64) {
+        const size_t count = std::min(size - off, size_t(64));
+        const __mmask64 mask = count == 64 ? ~__mmask64(0) : (__mmask64(1) << count) - 1;
+        const __m512i x = _mm512_maskz_loadu_epi8(mask, data + off);
+        pops = _mm512_add_epi64(pops, _mm512_popcnt_epi64(x));
+        for (int bit = 0; bit < 4; ++bit) {
+            const __m512i q = _mm512_maskz_loadu_epi8(mask, query + bit * size + off);
+            const __m512i p = _mm512_popcnt_epi64(_mm512_and_si512(q, x));
+            dots = _mm512_add_epi64(dots, _mm512_slli_epi64(p, bit));
+        }
+    }
+    return {static_cast<uint64_t>(_mm512_reduce_add_epi64(dots)),
+            static_cast<uint64_t>(_mm512_reduce_add_epi64(pops))};
+}
+} // namespace
+#endif
+
 template <>
 BitwiseAndDotProductResult bitwise_and_dot_product_with_popcount<
         SIMDLevel::AVX512>(
@@ -401,6 +427,11 @@ BitwiseAndDotProductResult bitwise_and_dot_product_with_popcount<
         const uint8_t* data,
         size_t size,
         size_t qb) {
+#if defined(__GNUC__) && defined(__x86_64__)
+    if (qb == 4 && __builtin_cpu_supports("avx512vpopcntdq")) {
+        return bitwise_q4_vpopcnt(query, data, size);
+    }
+#endif
     uint64_t dot_product = 0;
     uint64_t popcount_sum = 0;
     size_t offset = 0;

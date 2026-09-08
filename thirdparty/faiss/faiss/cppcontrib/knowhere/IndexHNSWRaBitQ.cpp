@@ -62,10 +62,13 @@ struct SplitStagedDistanceComputer final : StagedDistanceComputer {
         const auto* factors = reinterpret_cast<const rabitq_utils::SignBitFactorsWithError*>(
                 code + (dc->d + 7) / 8);
         const float s = scale(id);
-        const float raw_threshold = (similarity ? -threshold : threshold) / s;
         float d = estimate;
-        if (rabitq_utils::should_refine_candidate(estimate, factors->f_error,
-                dc->g_error, raw_threshold, similarity)) {
+        // Compare in output-distance units: positive cosine scale preserves
+        // ordering, avoiding a division for every visited candidate.
+        const float error = factors->f_error * dc->g_error;
+        const bool refine = similarity ? (estimate + error) * s > -threshold
+                                       : std::max(0.0f, estimate - error) < threshold;
+        if (refine) {
             d = dc->distance_to_code_full(code);
             ++refine_count;
         }

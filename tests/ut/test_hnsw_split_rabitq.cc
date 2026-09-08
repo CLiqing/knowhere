@@ -14,7 +14,26 @@
 #include <faiss/utils/distances.h>
 #include "catch2/catch_approx.hpp"
 #include "index/hnsw/impl/NativeSplitRaBitQDemo.h"
+#include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include <faiss/utils/rabitq_simd.h>
+
+TEST_CASE("Split qb4 SIMD matches scalar including masked tails", "[hnsw_split_native]") {
+#if defined(__GNUC__) && defined(__x86_64__)
+    if (!__builtin_cpu_supports("avx512f") || !__builtin_cpu_supports("avx512bw") ||
+        !__builtin_cpu_supports("avx512dq") || !__builtin_cpu_supports("avx512vl")) return;
+    for (size_t bytes : {1,7,8,15,16,31,32,63,64,65,96,192,193}) {
+        for (int seed=0;seed<8;++seed) {
+            std::vector<uint8_t> data(bytes+1), query(bytes*4+1);
+            for(size_t i=0;i<data.size();++i)data[i]=(i*31+seed*73)%256;
+            for(size_t i=0;i<query.size();++i)query[i]=(i*17+seed*47)%256;
+            const auto expected=faiss::rabitq::bitwise_and_dot_product_with_popcount<faiss::SIMDLevel::NONE>(query.data()+1,data.data()+1,bytes,4);
+            const auto actual=faiss::rabitq::bitwise_and_dot_product_with_popcount<faiss::SIMDLevel::AVX512>(query.data()+1,data.data()+1,bytes,4);
+            REQUIRE(actual.dot_product==expected.dot_product);
+            REQUIRE(actual.popcount==expected.popcount);
+        }
+    }
+#endif
+}
 
 TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_split_native]") {
 #if defined(__GNUC__) && defined(__x86_64__)
@@ -44,20 +63,30 @@ TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_
 
 TEST_CASE("Native split traversal retains all results when k covers the graph", "[hnsw_split_native]") {
     namespace fk = faiss::cppcontrib::knowhere;
+    for (const std::string metric : {"L2", "IP", "COSINE"}) {
+    CAPTURE(metric);
+    const bool similarity = metric != "L2", cosine = metric == "COSINE";
+    const auto metric_type = similarity ? faiss::METRIC_INNER_PRODUCT : faiss::METRIC_L2;
     constexpr int n = 128, dim = 65;
     auto base = GenDataSet(n, dim, 121);
     auto queries = GenDataSet(4, dim, 122);
     const auto* x = static_cast<const float*>(base->GetTensor());
+    // Use one connected topology for this full-coverage distance-order test.
     fk::IndexHNSWFlat fp32(dim, 16, faiss::METRIC_L2);
     fp32.add(n, x);
-    auto* rq = new faiss::IndexRaBitQ(dim, faiss::METRIC_L2, 8);
+    auto* rq = new faiss::IndexRaBitQ(dim, metric_type, 8);
     rq->qb = 4;
-    faiss::IndexPreTransform storage(new faiss::RandomRotationMatrix(dim, dim), rq);
+    auto* rr = new faiss::RandomRotationMatrix(dim, dim);
+    std::unique_ptr<faiss::IndexPreTransform> storage_owner(cosine
+        ? new fk::IndexPreTransformRaBitQCosine(rr, rq) : new faiss::IndexPreTransform(rr, rq));
+    auto& storage = *storage_owner;
     storage.own_fields = true;
     storage.train(n, x);
     storage.add(n, x);
-    fk::IndexHNSWRaBitQ graph;
-    graph.d = dim; graph.ntotal = n; graph.metric_type = faiss::METRIC_L2;
+    std::unique_ptr<fk::IndexHNSWRaBitQ> graph_owner(cosine
+        ? new fk::IndexHNSWRaBitQCosine() : new fk::IndexHNSWRaBitQ());
+    auto& graph = *graph_owner;
+    graph.d = dim; graph.ntotal = n; graph.metric_type = metric_type;
     graph.storage = &storage; graph.own_fields = false;
     graph.hnsw = std::move(fp32.hnsw);
     std::unique_ptr<faiss::DistanceComputer> full(storage.get_distance_computer());
@@ -65,15 +94,32 @@ TEST_CASE("Native split traversal retains all results when k covers the graph", 
     std::vector<faiss::idx_t> labels(4 * n);
     knowhere::native_split_demo::search(graph, 4,
         static_cast<const float*>(queries->GetTensor()), n, distances.data(), labels.data(), n, true);
+    std::vector<float> api_distances(4*n);
+    std::vector<faiss::idx_t> api_labels(4*n);
+    const char* previous_env=std::getenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL");
+    const bool had_env=previous_env!=nullptr;
+    const std::string previous_value=had_env ? previous_env : "";
+    setenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL","1",1);
+    knowhere::IndexHNSWWrapper api(&graph);
+    knowhere::SearchParametersHNSWWrapper params;params.efSearch=n;
+    api.search(4,static_cast<const float*>(queries->GetTensor()),n,api_distances.data(),api_labels.data(),&params);
+    if(had_env)setenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL",previous_value.c_str(),1);
+    else unsetenv("KNOWHERE_RBQ_NATIVE_TRAVERSAL");
+    for(int i=0;i<4*n;++i){
+        REQUIRE(api_labels[i]==labels[i]);
+        REQUIRE(api_distances[i]==Catch::Approx((similarity ? -1.f : 1.f)*distances[i]).margin(1e-5));
+    }
     for (int q = 0; q < 4; ++q) {
         full->set_query(static_cast<const float*>(queries->GetTensor()) + q * dim);
         std::vector<std::pair<float, faiss::idx_t>> expected;
-        for (int i = 0; i < n; ++i) expected.emplace_back((*full)(i), i);
+        for (int i = 0; i < n; ++i) expected.emplace_back((similarity ? -1.f : 1.f) * (*full)(i), i);
         std::sort(expected.begin(), expected.end());
         for (int i = 0; i < n; ++i) {
+            CAPTURE(q, i, distances[q*n+i], expected[i].first);
             REQUIRE(labels[q * n + i] == expected[i].second);
             REQUIRE(distances[q * n + i] == Catch::Approx(expected[i].first).margin(1e-5));
         }
+    }
     }
 }
 
@@ -121,6 +167,25 @@ TEST_CASE("Split staged distances preserve metric and cosine threshold semantics
                 }
                 REQUIRE(staged->estimate_count==256);
                 REQUIRE(staged->refine_count==128);
+                // Finite thresholds: compare the scaled inequality against the
+                // previous raw-threshold division, away from rounding ties.
+                for (int i=0; i<16; ++i) {
+                    const auto* code=raw->codes+i*raw->code_size;
+                    const auto* factors=reinterpret_cast<const faiss::rabitq_utils::SignBitFactorsWithError*>(code+(raw->d+7)/8);
+                    const float scale=cosine
+                        ? dynamic_cast<fk::IndexPreTransformRaBitQCosine*>(storage.get())->get_inverse_l2_norms()[i]
+                          / std::sqrt(faiss::fvec_norm_L2sqr(v,65)) : 1.f;
+                    const float estimate=raw->distance_to_code_1bit(code);
+                    for (float offset : {-10.f,-1.f,.125f,1.f,10.f}) {
+                        const float threshold=(similarity ? -estimate : estimate)*scale+offset;
+                        const bool refine=faiss::rabitq_utils::should_refine_candidate(
+                            estimate,factors->f_error,raw->g_error,(similarity ? -threshold : threshold)/scale,similarity);
+                        const float expected=(refine ? raw->distance_to_code_full(code) : estimate)*scale*(similarity ? -1.f : 1.f);
+                        const auto before=staged->refine_count;
+                        REQUIRE(staged->evaluate(i,threshold)==Catch::Approx(expected).margin(1e-5));
+                        REQUIRE(staged->refine_count-before==size_t(refine));
+                    }
+                }
             }
         }
     }
