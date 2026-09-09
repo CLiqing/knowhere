@@ -20,6 +20,7 @@
 #include <faiss/cppcontrib/knowhere/MetricType.h>
 #include <faiss/cppcontrib/knowhere/impl/CountSizeIOWriter.h>
 #include <faiss/cppcontrib/knowhere/impl/HnswSearcher.h>
+#include <faiss/cppcontrib/knowhere/impl/RaBitQBuildUtils.h>
 #include <faiss/cppcontrib/knowhere/impl/additional_io.h>
 #include <faiss/cppcontrib/knowhere/utils/Bitset.h>
 #include <faiss/utils/Heap.h>
@@ -676,41 +677,31 @@ convert_ds_to_float(const DataSetPtr& src, DataFormatEnum data_format) {
 }
 
 Status
-add_to_index(faiss::Index* const __restrict index, const DataSetPtr& dataset, const DataFormatEnum data_format,
-             bool chunk_fp32 = false) {
+add_to_index(faiss::Index* const __restrict index, const DataSetPtr& dataset, const DataFormatEnum data_format) {
     const auto* data = dataset->GetTensor();
     const auto rows = dataset->GetRows();
     const auto dim = dataset->GetDim();
 
-    if (data_format == DataFormatEnum::fp32 && !chunk_fp32) {
+    if (data_format == DataFormatEnum::fp32) {
         // add as is
         index->add(rows, reinterpret_cast<const float*>(data));
     } else {
         // convert data into float in pieces and add to the index
         constexpr int64_t n_tmp_rows = 4096;
-        std::unique_ptr<float[]> tmp;
-        if (data_format != DataFormatEnum::fp32) {
-            tmp = std::make_unique<float[]>(n_tmp_rows * dim);
-        }
+        std::unique_ptr<float[]> tmp = std::make_unique<float[]>(n_tmp_rows * dim);
 
         for (int64_t irow = 0; irow < rows; irow += n_tmp_rows) {
             const int64_t start_row = irow;
             const int64_t end_row = std::min(rows, start_row + n_tmp_rows);
             const int64_t count_rows = end_row - start_row;
 
-            const float* chunk = nullptr;
-            if (data_format == DataFormatEnum::fp32) {
-                chunk = reinterpret_cast<const float*>(data) + start_row * dim;
-            } else {
-                if (!convert_rows_to_fp32(data, tmp.get(), data_format, start_row, count_rows, dim)) {
-                    LOG_KNOWHERE_ERROR_ << "Unsupported data format";
-                    return Status::invalid_args;
-                }
-                chunk = tmp.get();
+            if (!convert_rows_to_fp32(data, tmp.get(), data_format, start_row, count_rows, dim)) {
+                LOG_KNOWHERE_ERROR_ << "Unsupported data format";
+                return Status::invalid_args;
             }
 
             // add
-            index->add(count_rows, chunk);
+            index->add(count_rows, tmp.get());
         }
     }
 
@@ -3213,10 +3204,15 @@ class BaseFaissRegularIndexHNSWRaBitQNode : public BaseFaissRegularIndexHNSWNode
             }
 
             LOG_KNOWHERE_INFO_ << "Adding " << dataset->GetRows() << " rows to RaBitQ storage";
-            // IndexPreTransform materializes its transformed input. Bound that
-            // temporary allocation instead of rotating the full FP32 dataset
-            // in one call.
-            status = add_to_index(tmp_index_rabitq[0].get(), dataset, data_format, true);
+            // Bound the rotation buffer only while populating RBQ storage;
+            // leave graph/refine construction and the common add API unchanged.
+            if (data_format == DataFormatEnum::fp32) {
+                faiss::cppcontrib::knowhere::rabitq_build::add_in_blocks(
+                    *tmp_index_rabitq[0], dataset->GetRows(), static_cast<const float*>(dataset->GetTensor()));
+            } else {
+                // Non-FP32 conversion already feeds storage in 4096-row blocks.
+                status = add_to_index(tmp_index_rabitq[0].get(), dataset, data_format);
+            }
             if (status != Status::success) {
                 return status;
             }

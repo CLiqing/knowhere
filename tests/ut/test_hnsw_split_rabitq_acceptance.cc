@@ -6,6 +6,7 @@
 #include <faiss/VectorTransform.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.h>
 #include <faiss/cppcontrib/knowhere/IndexRefine.h>
+#include <faiss/cppcontrib/knowhere/impl/RaBitQBuildUtils.h>
 #include <faiss/cppcontrib/knowhere/impl/RaBitQSearch.h>
 #include <faiss/cppcontrib/knowhere/impl/StagedDistanceComputer.h>
 #include <faiss/cppcontrib/knowhere/index_io.h>
@@ -41,6 +42,135 @@
 #include "utils.h"
 
 namespace rabitq_search = faiss::cppcontrib::knowhere::rabitq_search;
+
+TEST_CASE("RBQ bounded add preserves input slices and rejects invalid sizes", "[hnsw_split_acceptance][rbq_build]") {
+    using faiss::cppcontrib::knowhere::rabitq_build::add_in_blocks;
+    struct RecordingIndex : faiss::IndexFlatL2 {
+        std::vector<std::pair<faiss::idx_t, const float*>> calls;
+        RecordingIndex() : faiss::IndexFlatL2(3) {}
+        void add(faiss::idx_t n, const float* x) override {
+            calls.emplace_back(n, x);
+            ntotal += n;
+        }
+    };
+    std::vector<float> data(8193 * 3);
+    for (const auto n : {0, 1, 4095, 4096, 4097, 8193}) {
+        RecordingIndex index;
+        add_in_blocks(index, n, n ? data.data() : nullptr);
+        REQUIRE(index.ntotal == n);
+        REQUIRE(index.calls.size() == size_t((n + 4095) / 4096));
+        for (size_t i = 0; i < index.calls.size(); ++i) {
+            REQUIRE(index.calls[i].first == std::min(4096, n - int(i) * 4096));
+            REQUIRE(index.calls[i].second == data.data() + i * 4096 * 3);
+        }
+    }
+    RecordingIndex index;
+    add_in_blocks(index, 17, data.data(), 7);
+    REQUIRE(index.calls.size() == 3);
+    REQUIRE(index.calls.back().first == 3);
+    add_in_blocks(index, 2, data.data());
+    REQUIRE(index.ntotal == 19);
+    const auto calls = index.calls.size();
+    REQUIRE_THROWS(add_in_blocks(index, -1, data.data()));
+    REQUIRE_THROWS(add_in_blocks(index, 1, data.data(), 0));
+    REQUIRE_THROWS(add_in_blocks(index, 1, data.data(), -1));
+    REQUIRE_THROWS(add_in_blocks(index, 1, nullptr));
+    REQUIRE_THROWS(add_in_blocks(index, std::numeric_limits<faiss::idx_t>::max(), data.data()));
+    index.d = 0;
+    REQUIRE_THROWS(add_in_blocks(index, 1, data.data()));
+    REQUIRE(index.calls.size() == calls);
+}
+
+TEST_CASE("RBQ bounded storage encoding preserves codes norms and serialization", "[hnsw_split_acceptance][rbq_build]") {
+    namespace fk = faiss::cppcontrib::knowhere;
+    constexpr int n = 4101, d = 33;
+    auto dataset = GenDataSet(n, d, 29091);
+    const auto* x = static_cast<const float*>(dataset->GetTensor());
+    for (const bool cosine : {false, true}) {
+        for (const auto metric : {faiss::METRIC_L2, faiss::METRIC_INNER_PRODUCT}) {
+            if (cosine && metric != faiss::METRIC_INNER_PRODUCT) continue;
+            for (const uint8_t bits : {1, 4, 8, 9}) {
+                CAPTURE(cosine, metric, int(bits));
+                auto make_storage = [&]() -> std::unique_ptr<faiss::IndexPreTransform> {
+                    auto rotation = std::make_unique<faiss::RandomRotationMatrix>(d, d);
+                    auto leaf = std::make_unique<faiss::IndexRaBitQ>(d, metric, bits);
+                    std::unique_ptr<faiss::IndexPreTransform> storage;
+                    if (cosine) {
+                        storage = std::make_unique<fk::IndexPreTransformRaBitQCosine>(rotation.get(), leaf.get());
+                    } else {
+                        storage = std::make_unique<faiss::IndexPreTransform>(rotation.get(), leaf.get());
+                    }
+                    storage->own_fields = true;
+                    rotation.release();
+                    leaf.release();
+                    storage->train(n, x);
+                    return storage;
+                };
+                auto reference = make_storage();
+                auto actual = make_storage();
+                // Independent reproduction of the pre-refactor add_to_index loop.
+                for (int offset = 0; offset < n; offset += 4096) {
+                    reference->add(std::min(4096, n - offset), x + offset * d);
+                }
+                fk::rabitq_build::add_in_blocks(*actual, n, x);
+                REQUIRE(actual->ntotal == n);
+                auto* rbq = dynamic_cast<faiss::IndexRaBitQ*>(actual->index);
+                auto* expected = dynamic_cast<faiss::IndexRaBitQ*>(reference->index);
+                REQUIRE(rbq != nullptr);
+                REQUIRE(expected != nullptr);
+                REQUIRE(rbq->center == expected->center);
+                REQUIRE(rbq->codes == expected->codes);
+                if (cosine) {
+                    auto* norms = dynamic_cast<fk::IndexPreTransformRaBitQCosine*>(actual.get());
+                    REQUIRE(norms != nullptr);
+                    norms->validate_norms();
+                    for (const int row : {0, 4095, 4096, 4100}) {
+                        const auto norm2 = faiss::fvec_norm_L2sqr(x + row * d, d);
+                        REQUIRE(norms->get_inverse_l2_norms()[row] == Catch::Approx(1 / std::sqrt(norm2)));
+                    }
+                }
+                faiss::VectorIOWriter before, after;
+                fk::write_index(reference.get(), &before);
+                fk::write_index(actual.get(), &after);
+                REQUIRE(before.data == after.data);
+                faiss::VectorIOReader reader;
+                reader.data = after.data;
+                std::unique_ptr<faiss::Index> loaded(fk::read_index(&reader));
+                REQUIRE(loaded->ntotal == n);
+                faiss::VectorIOWriter roundtrip;
+                fk::write_index(loaded.get(), &roundtrip);
+                REQUIRE(roundtrip.data == after.data);
+                std::unique_ptr<faiss::DistanceComputer> a(actual->get_distance_computer());
+                std::unique_ptr<faiss::DistanceComputer> b(loaded->get_distance_computer());
+                a->set_query(x);
+                b->set_query(x);
+                for (const int row : {0, 4095, 4096, 4100}) REQUIRE((*a)(row) == (*b)(row));
+            }
+        }
+    }
+}
+
+TEST_CASE("RBQ bounded add keeps outer refinement in the original input space", "[hnsw_split_acceptance][rbq_build]") {
+    namespace fk = faiss::cppcontrib::knowhere;
+    constexpr int n = 4101, d = 16;
+    auto dataset = GenDataSet(n, d, 29092);
+    const auto* x = static_cast<const float*>(dataset->GetTensor());
+    faiss::RandomRotationMatrix rotation(d, d);
+    faiss::IndexRaBitQ leaf(d, faiss::METRIC_L2, 4);
+    faiss::IndexPreTransform storage(&rotation, &leaf);
+    fk::IndexRefineFlat refine(&storage);
+    refine.train(n, x);
+    fk::rabitq_build::add_in_blocks(refine, n, x);
+    REQUIRE(refine.ntotal == n);
+    REQUIRE(storage.ntotal == n);
+    REQUIRE(leaf.ntotal == n);
+    REQUIRE(refine.refine_index->ntotal == n);
+    std::vector<float> reconstructed(d);
+    for (const int row : {0, 4095, 4096, 4100}) {
+        refine.reconstruct(row, reconstructed.data());
+        REQUIRE(std::equal(reconstructed.begin(), reconstructed.end(), x + row * d));
+    }
+}
 
 TEST_CASE("RaBitQ memory serialization permits empty transfers without touching null pointers",
           "[hnsw_split_acceptance]") {
