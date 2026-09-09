@@ -38,13 +38,13 @@ TEST_CASE("Split qb4 SIMD matches scalar including masked tails", "[hnsw_split_n
 #endif
 }
 
-TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_split_native]") {
+TEST_CASE("Split SIMD full scorers independently match scalar for multi-bit tails", "[hnsw_split_native]") {
 #if defined(__GNUC__) && defined(__x86_64__)
-    if (!__builtin_cpu_supports("avx512f") || !__builtin_cpu_supports("avx512bw") ||
-        !__builtin_cpu_supports("avx512dq") || !__builtin_cpu_supports("avx512vl") ||
-        !__builtin_cpu_supports("bmi2")) return;
+    const bool avx512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+                       __builtin_cpu_supports("avx512dq") && __builtin_cpu_supports("avx512vl");
+    const bool avx2_supported = __builtin_cpu_supports("avx2");
     for (size_t d : {1, 7, 8, 15, 16, 23, 24, 31, 65, 200, 768, 1536}) {
-        for (size_t ex : {2, 3, 4, 5, 6, 7, 8}) {
+        for (size_t ex : {1, 2, 3, 4, 5, 6, 7, 8}) {
             for (int seed = 1; seed <= 3; ++seed) {
                 CAPTURE(d, ex, seed);
                 std::vector<uint8_t> signs((d+7)/8), extra((d*ex+7)/8+(ex==8 ? 0 : 32));
@@ -55,12 +55,16 @@ TEST_CASE("Split AVX512 full scorer matches scalar for multi-bit tails", "[hnsw_
                 const float cb=-float(1u<<ex)+.5f;
                 const float ref=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::NONE>(
                     signs.data(),extra.data(),query.data(),d,ex,cb);
-                const float actual=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX512>(
-                    signs.data(),extra.data(),query.data(),d,ex,cb);
-                REQUIRE(actual == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
-                const float avx2=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX2>(
-                    signs.data(),extra.data(),query.data(),d,ex,cb);
-                REQUIRE(avx2 == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
+                if (avx512) {
+                    const float actual=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX512>(
+                        signs.data(),extra.data(),query.data(),d,ex,cb);
+                    REQUIRE(actual == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
+                }
+                if (avx2_supported) {
+                    const float avx2=faiss::rabitq::multibit::compute_inner_product<faiss::SIMDLevel::AVX2>(
+                        signs.data(),extra.data(),query.data(),d,ex,cb);
+                    REQUIRE(avx2 == Catch::Approx(ref).epsilon(1e-5).margin(1e-3));
+                }
             }
         }
     }

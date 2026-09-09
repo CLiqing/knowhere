@@ -1163,7 +1163,8 @@ Index* read_index(IOReader* f, int io_flags) {
             h == fourcc("IwQR")) {
         idx = read_ivfpq(f, h, io_flags);
     } else if (h == fourcc(kRaBitQPreTransformCosineFourcc)) {
-        auto* ixpt = new IndexPreTransformRaBitQCosine();
+        auto owner = std::make_unique<IndexPreTransformRaBitQCosine>();
+        auto* ixpt = owner.get();
         ixpt->own_fields = true;
         read_index_header(ixpt, f);
         int nt;
@@ -1176,9 +1177,10 @@ Index* read_index(IOReader* f, int io_flags) {
         ixpt->index = read_index(f, io_flags);
         READVECTOR(ixpt->inverse_norms_storage.inverse_l2_norms);
         ixpt->validate_norms();
-        idx = ixpt;
+        idx = owner.release();
     } else if (h == fourcc("IxPT")) {
-        IndexPreTransform* ixpt = new IndexPreTransform();
+        auto owner = std::make_unique<IndexPreTransform>();
+        auto* ixpt = owner.get();
         ixpt->own_fields = true;
         read_index_header(ixpt, f);
         int nt;
@@ -1191,7 +1193,7 @@ Index* read_index(IOReader* f, int io_flags) {
             ixpt->chain.push_back(read_VectorTransform(f));
         }
         ixpt->index = read_index(f, io_flags);
-        idx = ixpt;
+        idx = owner.release();
     } else if (h == fourcc("Imiq")) {
         MultiIndexQuantizer* imiq = new MultiIndexQuantizer();
         read_index_header(imiq, f);

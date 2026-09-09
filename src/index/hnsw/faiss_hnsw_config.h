@@ -232,6 +232,10 @@ class FaissHnswRaBitQConfig : public FaissHnswConfig {
         }
 
 
+        if ((param_type == PARAM_TYPE::DESERIALIZE || param_type == PARAM_TYPE::DESERIALIZE_FROM_FILE) &&
+            enable_mmap.value_or(false)) {
+            return HandleError(err_msg, "HNSW_RABITQ does not support mmap loading", Status::invalid_args);
+        }
         if (param_type == PARAM_TYPE::TRAIN && refine_type.has_value() &&
             !WhetherAcceptableRefineType(refine_type.value())) {
             return HandleError(err_msg,
