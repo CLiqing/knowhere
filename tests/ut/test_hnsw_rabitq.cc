@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Zilliz. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -20,7 +23,7 @@
 
 namespace rabitq_search = faiss::cppcontrib::knowhere::rabitq_search;
 
-TEST_CASE("Split qb4 SIMD matches scalar including masked tails", "[hnsw_split_native]") {
+TEST_CASE("RaBitQ qb4 SIMD matches scalar including masked tails", "[hnsw_rabitq_core]") {
 #if defined(__GNUC__) && defined(__x86_64__)
     if (!__builtin_cpu_supports("avx512f") || !__builtin_cpu_supports("avx512bw") ||
         !__builtin_cpu_supports("avx512dq") || !__builtin_cpu_supports("avx512vl")) return;
@@ -38,7 +41,7 @@ TEST_CASE("Split qb4 SIMD matches scalar including masked tails", "[hnsw_split_n
 #endif
 }
 
-TEST_CASE("Split SIMD full scorers independently match scalar for multi-bit tails", "[hnsw_split_native]") {
+TEST_CASE("RaBitQ SIMD full scorers independently match scalar for multi-bit tails", "[hnsw_rabitq_core]") {
 #if defined(__GNUC__) && defined(__x86_64__)
     const bool avx512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
                        __builtin_cpu_supports("avx512dq") && __builtin_cpu_supports("avx512vl");
@@ -71,7 +74,7 @@ TEST_CASE("Split SIMD full scorers independently match scalar for multi-bit tail
 #endif
 }
 
-TEST_CASE("Native split traversal retains all results when k covers the graph", "[hnsw_split_native]") {
+TEST_CASE("RaBitQ traversal retains all results when k covers the graph", "[hnsw_rabitq_core]") {
     namespace fk = faiss::cppcontrib::knowhere;
     for (const std::string metric : {"L2", "IP", "COSINE"}) {
     CAPTURE(metric);
@@ -127,7 +130,7 @@ TEST_CASE("Native split traversal retains all results when k covers the graph", 
     }
 }
 
-TEST_CASE("Split staged distances preserve metric and cosine threshold semantics", "[hnsw_split_rabitq]") {
+TEST_CASE("RaBitQ staged distances preserve metric and cosine threshold semantics", "[hnsw_rabitq]") {
     namespace fk = faiss::cppcontrib::knowhere;
     for (const auto* metric : {"L2", "IP", "COSINE"}) {
         const bool cosine = std::string(metric)=="COSINE";
@@ -195,7 +198,7 @@ TEST_CASE("Split staged distances preserve metric and cosine threshold semantics
     }
 }
 
-TEST_CASE("Split HNSW RaBitQ metrics and serialized search", "[hnsw_split_rabitq]") {
+TEST_CASE("HNSW RaBitQ metrics and serialized search", "[hnsw_rabitq]") {
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     for (const auto* metric : {"L2", "IP", "COSINE"}) {
         for (int qb : {0, 4}) {
@@ -249,7 +252,7 @@ TEST_CASE("Split HNSW RaBitQ metrics and serialized search", "[hnsw_split_rabitq
     }
 }
 
-TEST_CASE("Split public search supports all database and query bit widths", "[hnsw_split_rabitq]") {
+TEST_CASE("RaBitQ public search supports all database and query bit widths", "[hnsw_rabitq]") {
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     auto base = GenDataSet(128, 33, 731);
     auto query = GenDataSet(3, 33, 732);
@@ -314,7 +317,7 @@ TEST_CASE("Split public search supports all database and query bit widths", "[hn
     }
 }
 
-TEST_CASE("Split request qb survives refine range iterator and concurrent search", "[hnsw_split_rabitq]") {
+TEST_CASE("RaBitQ request qb survives refine range iterator and concurrent search", "[hnsw_rabitq]") {
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     auto base = GenDataSet(256, 33, 833);
     auto query = GenDataSet(1, 33, 834);
@@ -370,7 +373,7 @@ TEST_CASE("Split request qb survives refine range iterator and concurrent search
     }
 }
 
-TEST_CASE("Split RBQ9 supports floating input formats and loaded request parameters", "[hnsw_split_rabitq]") {
+TEST_CASE("RaBitQ 9-bit storage supports floating input formats and loaded request parameters", "[hnsw_rabitq]") {
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     auto base = GenDataSet(128, 33, 913);
     auto query = GenDataSet(2, 33, 914);
@@ -415,7 +418,7 @@ TEST_CASE("Split RBQ9 supports floating input formats and loaded request paramet
     exercise(knowhere::bf16{});
 }
 
-TEST_CASE("Generic HNSW parameter factory preserves SQ and PQ searches", "[hnsw_split_regression]") {
+TEST_CASE("Generic HNSW parameter factory preserves SQ and PQ searches", "[hnsw_rabitq_regression]") {
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     auto base = GenDataSet(1024, 32, 931);
     auto query = GenDataSet(2, 32, 932);

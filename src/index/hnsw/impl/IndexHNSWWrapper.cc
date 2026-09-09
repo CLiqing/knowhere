@@ -41,7 +41,7 @@
 #endif
 
 namespace knowhere {
-namespace native_split_demo = faiss::cppcontrib::knowhere::rabitq_search;
+namespace rabitq_search = faiss::cppcontrib::knowhere::rabitq_search;
 
 /**************************************************************
  * Utilities
@@ -110,16 +110,16 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
     const auto* rbq_params = dynamic_cast<const SearchParametersHNSWRaBitQWrapper*>(params);
     // Use the optimized multi-bit path only when its selector/visitor contract
     // is satisfied. RBQ1, filtering and feder use the compatible searcher below.
-    const auto* demo_split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
+    const auto* rabitq_index = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
     const auto* bitset_sel = params ? dynamic_cast<const knowhere::BitsetViewIDSelector*>(params->sel) : nullptr;
     const bool unfiltered = !params || !params->sel || (bitset_sel && bitset_sel->bitset_view.empty());
-    if (demo_split && demo_split->rabitq_index()->rabitq.nb_bits > 1 &&
+    if (rabitq_index && rabitq_index->rabitq_index()->rabitq.nb_bits > 1 &&
         unfiltered && (!params || !params->feder)) {
-        native_split_demo::search(*demo_split, n, x, k, distances, labels,
+        rabitq_search::search(*rabitq_index, n, x, k, distances, labels,
                                   params ? params->efSearch : hnsw.efSearch,
                                   params ? params->check_relative_distance : hnsw.check_relative_distance,
                                   rbq_params ? &rbq_params->storage_params : nullptr,
-                                  [&](const native_split_demo::Counts& counts) {
+                                  [&](const rabitq_search::SearchStats& counts) {
                                       const size_t hops = counts.expanded + counts.upper_expanded;
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
                                       knowhere::knowhere_hnsw_search_hops.Observe(hops);
@@ -150,8 +150,7 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    const auto* split = dynamic_cast<const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ*>(index_hnsw);
-    std::unique_ptr<faiss::DistanceComputer> dis(split ? split->get_staged_distance_computer(
+    std::unique_ptr<faiss::DistanceComputer> dis(rabitq_index ? rabitq_index->get_staged_distance_computer(
                                                         rbq_params ? &rbq_params->storage_params : nullptr)
                                                     : storage_distance_computer(index_hnsw->storage));
 
@@ -236,14 +235,6 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
             }
         }
 
-        if (std::getenv("KNOWHERE_RBQ_TRACE_COUNTS")) {
-            if (auto* staged = dynamic_cast<faiss::cppcontrib::knowhere::StagedDistanceComputer*>(dis.get())) {
-                std::fprintf(stderr,
-                    "RBQ_COUNTS legacy ef=%d estimate=%zu refine=%zu expanded_total=%zu upper_full=%zu\n",
-                    params ? params->efSearch : hnsw.efSearch, staged->estimate_count, staged->refine_count,
-                    local_stats.nhops, local_stats.ndis - staged->estimate_count + 1);
-            }
-        }
         // record some statistics
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         knowhere::knowhere_hnsw_search_hops.Observe(local_stats.nhops);

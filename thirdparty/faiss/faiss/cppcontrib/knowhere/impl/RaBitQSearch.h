@@ -16,23 +16,21 @@
 #include <faiss/impl/hnsw/MinimaxHeap.h>
 #include <faiss/utils/distances.h>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <functional>
 
 namespace faiss::cppcontrib::knowhere::rabitq_search {
-struct Counts {
+struct SearchStats {
     size_t estimate = 0, refine = 0, expanded = 0, upper_full = 0, upper_expanded = 0;
     bool exhausted = false;
 };
 
 template <class VT>
-Counts search_one(const faiss::cppcontrib::knowhere::HNSW& graph,
+SearchStats search_one(const faiss::cppcontrib::knowhere::HNSW& graph,
                   faiss::RaBitQDistanceComputer& rq, VT& vt,
                   faiss::ResultHandler& res, int ef, bool relative,
                   bool similarity = false, const float* norms = nullptr,
                   float query_inverse_norm = 1) {
-    Counts stats;
+    SearchStats stats;
     using HC = faiss::CMax<float, int32_t>;
     int32_t nearest = graph.entry_point;
     auto scale = [&](int32_t id) { return norms ? norms[id] * query_inverse_norm : 1.f; };
@@ -124,7 +122,7 @@ inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
                    faiss::idx_t n, const float* x, faiss::idx_t k, float* distances,
                    faiss::idx_t* labels, int ef, bool relative,
                    const faiss::RaBitQSearchParameters* params = nullptr,
-                   const std::function<void(const Counts&)>& on_query = {}) {
+                   const std::function<void(const SearchStats&)>& on_query = {}) {
     FAISS_THROW_IF_NOT(index.metric_type == faiss::METRIC_L2 ||
                       index.metric_type == faiss::METRIC_INNER_PRODUCT);
     const bool similarity = index.metric_type == faiss::METRIC_INNER_PRODUCT;
@@ -135,20 +133,19 @@ inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
         params ? index.rabitq_index()->get_quantized_distance_computer(params->qb, params->centered)
                : index.rabitq_index()->get_FlatCodesDistanceComputer());
     auto& rq = dynamic_cast<faiss::RaBitQDistanceComputer&>(*raw);
-    // Same existing Faiss reusable visited-table implementation as the native
-    // benchmark. No new custom thread-local cache is introduced by this demo.
+    // Reuse Faiss's visited table across queries without clearing the full
+    // table on each search; advance its generation after processing the query.
     auto& vt = faiss::VisitedTable::get_reusable(index.ntotal);
     faiss::HeapBlockResultHandler<faiss::CMax<float, int64_t>> block(n, distances, labels, k);
     decltype(block)::SingleResultHandler result(block);
     std::vector<float> rotated(index.d);
-    const bool counters = std::getenv("KNOWHERE_RBQ_TRACE_COUNTS") != nullptr;
     for (faiss::idx_t i = 0; i < n; ++i) {
         result.begin(i);
         index.pretransform_index()->chain[0]->apply_noalloc(1, x + i * index.d, rotated.data());
         rq.set_query(rotated.data());
         const float norm2 = norms ? faiss::fvec_norm_L2sqr(x + i * index.d, index.d) : 1.f;
         const float query_inverse_norm = norm2 > 0 ? 1.f / std::sqrt(norm2) : 1.f;
-        Counts stats;
+        SearchStats stats;
         if (auto* vector = dynamic_cast<faiss::VisitedTableVector*>(&vt))
             stats = search_one(index.hnsw, rq, *vector, result, std::max<int>(ef, k), relative,
                                similarity, norms, query_inverse_norm);
@@ -158,9 +155,6 @@ inline void search(const faiss::cppcontrib::knowhere::IndexHNSWRaBitQ& index,
         result.end();
         vt.advance();
         if (on_query) on_query(stats);
-        if (counters) std::fprintf(stderr,
-            "RBQ_COUNTS native ef=%d estimate=%zu refine=%zu expanded_total=%zu upper_full=%zu\n",
-            ef, stats.estimate, stats.refine, stats.expanded + stats.upper_expanded, stats.upper_full);
     }
 }
 } // namespace faiss::cppcontrib::knowhere::rabitq_search

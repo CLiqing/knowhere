@@ -131,7 +131,7 @@ void quantize_query_values(
 
 // NONE specializations — scalar fallbacks
 
-// Split codes and query bit planes are byte-aligned, including their tails.
+// RaBitQ codes and query bit planes are byte-aligned, including their tails.
 // memcpy preserves the unaligned load contract without pointer-alignment UB.
 inline uint64_t load_u64_unaligned(const uint8_t* ptr) {
     uint64_t value;

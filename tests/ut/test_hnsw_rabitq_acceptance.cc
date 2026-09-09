@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -43,7 +44,7 @@
 
 namespace rabitq_search = faiss::cppcontrib::knowhere::rabitq_search;
 
-TEST_CASE("RBQ bounded add preserves input slices and rejects invalid sizes", "[hnsw_split_acceptance][rbq_build]") {
+TEST_CASE("RBQ bounded add preserves input slices and rejects invalid sizes", "[hnsw_rabitq_acceptance][rbq_build]") {
     using faiss::cppcontrib::knowhere::rabitq_build::add_in_blocks;
     struct RecordingIndex : faiss::IndexFlatL2 {
         std::vector<std::pair<faiss::idx_t, const float*>> calls;
@@ -81,7 +82,7 @@ TEST_CASE("RBQ bounded add preserves input slices and rejects invalid sizes", "[
     REQUIRE(index.calls.size() == calls);
 }
 
-TEST_CASE("RBQ bounded storage encoding preserves codes norms and serialization", "[hnsw_split_acceptance][rbq_build]") {
+TEST_CASE("RBQ bounded storage encoding preserves codes norms and serialization", "[hnsw_rabitq_acceptance][rbq_build]") {
     namespace fk = faiss::cppcontrib::knowhere;
     constexpr int n = 4101, d = 33;
     auto dataset = GenDataSet(n, d, 29091);
@@ -150,7 +151,7 @@ TEST_CASE("RBQ bounded storage encoding preserves codes norms and serialization"
     }
 }
 
-TEST_CASE("RBQ bounded add keeps outer refinement in the original input space", "[hnsw_split_acceptance][rbq_build]") {
+TEST_CASE("RBQ bounded add keeps outer refinement in the original input space", "[hnsw_rabitq_acceptance][rbq_build]") {
     namespace fk = faiss::cppcontrib::knowhere;
     constexpr int n = 4101, d = 16;
     auto dataset = GenDataSet(n, d, 29092);
@@ -173,7 +174,7 @@ TEST_CASE("RBQ bounded add keeps outer refinement in the original input space", 
 }
 
 TEST_CASE("RaBitQ memory serialization permits empty transfers without touching null pointers",
-          "[hnsw_split_acceptance]") {
+          "[hnsw_rabitq_acceptance]") {
     knowhere::MemoryIOWriter writer;
     REQUIRE(writer(nullptr, sizeof(float), 0) == 0);
     REQUIRE(writer(nullptr, 0, 17) == 0);
@@ -193,7 +194,7 @@ TEST_CASE("RaBitQ memory serialization permits empty transfers without touching 
     REQUIRE(reader(nullptr, sizeof(float), 0) == 0);
 }
 
-TEST_CASE("RaBitQ byte-aligned bitwise kernels match independent byte oracle", "[hnsw_split_native]") {
+TEST_CASE("RaBitQ byte-aligned bitwise kernels match independent byte oracle", "[hnsw_rabitq_core]") {
     auto exercise = [&](auto level_tag) {
         constexpr auto level = decltype(level_tag)::value;
         for (size_t size : {1, 7, 8, 9, 15, 31, 32, 63, 64, 65, 192})
@@ -229,7 +230,7 @@ TEST_CASE("RaBitQ byte-aligned bitwise kernels match independent byte oracle", "
 #endif
 }
 
-TEST_CASE("Split iterators own query and parameter state while the parent index is retained", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ iterators own query and parameter state while the parent index is retained", "[hnsw_rabitq_acceptance]") {
     for (int qb : {0, 4, 8}) {
         // Common IndexIterator borrows the node-owned result IdMap. The parent
         // index must outlive iteration; only request-local objects are released.
@@ -271,7 +272,7 @@ TEST_CASE("Split iterators own query and parameter state while the parent index 
 }
 
 // Opt-in data-backed diagnostic; ordinary CI does not require benchmark files.
-TEST_CASE("Split original COSINE and normalized IP real-data metric diagnostic", "[.hnsw_split_realdata]") {
+TEST_CASE("RaBitQ original COSINE and normalized IP real-data metric diagnostic", "[.hnsw_rabitq_realdata]") {
     const char* data_root = std::getenv("KNOWHERE_RBQ_ACCEPTANCE_DATA");
     REQUIRE(data_root != nullptr);
     constexpr int n = 4096, nq = 16, k = 100;
@@ -343,7 +344,7 @@ TEST_CASE("Split original COSINE and normalized IP real-data metric diagnostic",
     }
 }
 
-TEST_CASE("Split same-index full distances agree across available SIMD levels", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ same-index full distances agree across available SIMD levels", "[hnsw_rabitq_acceptance]") {
     struct RestoreLevel {
         faiss::SIMDLevel level = faiss::SIMDConfig::get_level();
         ~RestoreLevel() {
@@ -390,7 +391,7 @@ TEST_CASE("Split same-index full distances agree across available SIMD levels", 
         }
 }
 
-TEST_CASE("Split advertised refiners rerank the requested expanded candidate set", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ advertised refiners rerank the requested expanded candidate set", "[hnsw_rabitq_acceptance]") {
     namespace fk = faiss::cppcontrib::knowhere;
     auto base = GenDataSet(256, 33, 1991);
     auto query = GenDataSet(1, 33, 1992);
@@ -451,7 +452,7 @@ TEST_CASE("Split advertised refiners rerank the requested expanded candidate set
     }
 }
 
-TEST_CASE("Split feder trace contains valid edges and retains exhaustive results", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ feder trace contains valid edges and retains exhaustive results", "[hnsw_rabitq_acceptance]") {
     auto base = GenDataSet(128, 33, 1951);
     auto query = GenDataSet(1, 33, 1952);
     for (const auto* metric : {"L2", "IP", "COSINE"}) {
@@ -501,7 +502,7 @@ TEST_CASE("Split feder trace contains valid edges and retains exhaustive results
     }
 }
 
-TEST_CASE("Split file serialization rejects truncated and incompatible indexes", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ file serialization rejects truncated and incompatible indexes", "[hnsw_rabitq_acceptance]") {
     namespace fk = faiss::cppcontrib::knowhere;
     auto base = GenDataSet(128, 33, 1931);
     auto query = GenDataSet(2, 33, 1932);
@@ -569,7 +570,7 @@ TEST_CASE("Split file serialization rejects truncated and incompatible indexes",
             REQUIRE_THROWS(cosine->validate_cosine_storage());
         }
         // A real file, independently loaded through the public Knowhere API.
-        auto pattern = (std::filesystem::temp_directory_path() / "knowhere-split-XXXXXX").string();
+        auto pattern = (std::filesystem::temp_directory_path() / "knowhere-rabitq-XXXXXX").string();
         std::vector<char> filename(pattern.begin(), pattern.end());
         filename.push_back('\0');
         const int fd = mkstemp(filename.data());
@@ -608,7 +609,7 @@ TEST_CASE("Split file serialization rejects truncated and incompatible indexes",
     }
 }
 
-TEST_CASE("Shared Faiss IVF RaBitQ bits and query parameters survive serialization", "[hnsw_split_regression]") {
+TEST_CASE("Shared Faiss IVF RaBitQ bits and query parameters survive serialization", "[hnsw_rabitq_regression]") {
     auto base = GenDataSet(512, 33, 1961);
     auto query = GenDataSet(2, 33, 1962);
     auto* x = static_cast<const float*>(base->GetTensor());
@@ -646,7 +647,7 @@ TEST_CASE("Shared Faiss IVF RaBitQ bits and query parameters survive serializati
     }
 }
 
-TEST_CASE("Split invalid build parameters are explicitly rejected", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ invalid build parameters are explicitly rejected", "[hnsw_rabitq_acceptance]") {
     auto base = GenDataSet(64, 33, 1971);
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     for (auto feature : {knowhere::feature::MMAP, knowhere::feature::MV, knowhere::feature::EMB_LIST}) {
@@ -667,7 +668,7 @@ TEST_CASE("Split invalid build parameters are explicitly rejected", "[hnsw_split
     }
 }
 
-TEST_CASE("Split request state remains stable over repeated concurrent load lifecycles", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ request state remains stable over repeated concurrent load lifecycles", "[hnsw_rabitq_acceptance]") {
     auto base = GenDataSet(256, 33, 1941);
     auto query = GenDataSet(1, 33, 1942);
     for (int cycle = 0; cycle < 4; ++cycle) {
@@ -723,7 +724,7 @@ TEST_CASE("Split request state remains stable over repeated concurrent load life
     }
 }
 
-TEST_CASE("Split filtered results and exhausted iterators match full-code references", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ filtered results and exhausted iterators match full-code references", "[hnsw_rabitq_acceptance]") {
     constexpr int n = 256, d = 33, k = 10;
     const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
     auto base = GenDataSet(n, d, 1901);
@@ -891,7 +892,7 @@ TEST_CASE("Split filtered results and exhausted iterators match full-code refere
     }
 }
 
-TEST_CASE("Split range boundaries and range_filter match full-code reference", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ range boundaries and range_filter match full-code reference", "[hnsw_rabitq_acceptance]") {
     constexpr int n = 128, d = 33;
     auto base = GenDataSet(n, d, 1911);
     auto query = GenDataSet(1, d, 1912);
@@ -937,7 +938,7 @@ TEST_CASE("Split range boundaries and range_filter match full-code reference", "
     }
 }
 
-TEST_CASE("Split FP16 BF16 and FP32 refine return refiner distances", "[hnsw_split_acceptance]") {
+TEST_CASE("RaBitQ FP16 BF16 and FP32 refine return refiner distances", "[hnsw_rabitq_acceptance]") {
     constexpr int n = 128, d = 33, k = 20;
     auto base = GenDataSet(n, d, 1921);
     auto query = GenDataSet(1, d, 1922);

@@ -210,7 +210,7 @@ class FaissHnswRaBitQConfig : public FaissHnswConfig {
             .for_train()
             .for_static();
         KNOWHERE_CONFIG_DECLARE_FIELD(rbq_bits_query)
-            .description("query bits for the split RaBitQ coarse estimator; 0 uses FP32")
+            .description("query bits for the RaBitQ coarse estimator; 0 uses FP32")
             .set_default(4)
             .set_range(0, 8)
             .for_search()

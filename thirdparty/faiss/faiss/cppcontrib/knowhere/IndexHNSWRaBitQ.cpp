@@ -19,7 +19,7 @@
 namespace faiss::cppcontrib::knowhere {
 
 namespace {
-struct SplitStagedDistanceComputer final : StagedDistanceComputer {
+struct RaBitQStagedDistanceComputer final : StagedDistanceComputer {
     const faiss::VectorTransform& rotation;
     std::unique_ptr<faiss::RaBitQDistanceComputer> dc;
     const float* norms;
@@ -27,7 +27,7 @@ struct SplitStagedDistanceComputer final : StagedDistanceComputer {
     float query_inverse_norm = 1;
     std::vector<float> rotated;
 
-    explicit SplitStagedDistanceComputer(const IndexHNSWRaBitQ& index,
+    explicit RaBitQStagedDistanceComputer(const IndexHNSWRaBitQ& index,
                                         const faiss::RaBitQSearchParameters* params)
         : rotation(*index.pretransform_index()->chain[0]),
           norms(nullptr), similarity(index.metric_type == METRIC_INNER_PRODUCT),
@@ -81,7 +81,7 @@ struct SplitStagedDistanceComputer final : StagedDistanceComputer {
 
 faiss::DistanceComputer* IndexHNSWRaBitQ::get_staged_distance_computer(
         const faiss::RaBitQSearchParameters* params) const {
-    return new SplitStagedDistanceComputer(*this, params);
+    return new RaBitQStagedDistanceComputer(*this, params);
 }
 
 IndexPreTransformRaBitQCosine::IndexPreTransformRaBitQCosine() = default;
