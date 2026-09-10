@@ -165,6 +165,13 @@ class IndexNode : public Object {
     Search(const DataSetPtr dataset, std::unique_ptr<Config> cfg, const BitsetView& bitset,
            milvus::OpContext* op_context = nullptr) const = 0;
 
+    // Development capability, checked on the loaded backend, not its public
+    // index name. Default rejects opaque predicates. No cost planning here.
+    virtual bool
+    SupportsAnnFusingDemo() const {
+        return false;
+    }
+
     /**
      * @brief Computes exact distances for ids already in the base-vector storage domain.
      *

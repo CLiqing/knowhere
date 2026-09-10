@@ -26,6 +26,7 @@
 #include <utility>
 
 #include "knowhere/array_store.h"
+#include "knowhere/candidate_evaluator.h"
 
 namespace knowhere {
 
@@ -45,6 +46,22 @@ class BitsetView {
     }
 
     BitsetView(const std::nullptr_t) : BitsetView() {
+    }
+
+    // Separate, non-owning search predicate attachment. Bitmap operations and
+    // counts describe mandatory exclusions only; they never evaluate this
+    // predicate. Only an explicitly capable backend may consume this view.
+    void
+    set_candidate_evaluator(const CandidateEvaluatorViewV1* evaluator) {
+        if (evaluator != nullptr && !evaluator->valid()) {
+            throw std::invalid_argument("invalid candidate evaluator V1");
+        }
+        candidate_evaluator_ = evaluator;
+    }
+
+    const CandidateEvaluatorViewV1*
+    candidate_evaluator() const {
+        return candidate_evaluator_;
     }
 
     bool
@@ -466,6 +483,7 @@ class BitsetView {
         return id_offset_ >= num_bits_ || vector_count_ > num_bits_ - id_offset_;
     }
 
+    const CandidateEvaluatorViewV1* candidate_evaluator_ = nullptr;
     const uint8_t* bits_ = nullptr;
     size_t num_bits_ = 0;
     // Backend-vector count used as the filter-ratio denominator.
