@@ -299,7 +299,9 @@ class IndexNode : public Object {
         if (bitset.num_bits() == 0) {
             return prepared;
         }
-        if (bitset.data() == nullptr) {
+        // An owned enumerable filter is valid without a materialized bitmap.
+        // Calling data() only to validate it would eagerly create that bitmap.
+        if (!bitset.enumerable() && bitset.data() == nullptr) {
             const auto msg = std::string("bitset data is null while bitset size is non-zero");
             LOG_KNOWHERE_ERROR_ << msg;
             return expected<PreparedBitset>::Err(Status::invalid_args, msg);
@@ -629,7 +631,7 @@ class IndexNode : public Object {
     CalcBitsetCount(BitsetView& bitset, const IdMap& id_map, size_t offset = 0,
                     size_t bitset_count = std::numeric_limits<size_t>::max()) const {
         // Exact filter counts are reported in the backend vector domain.
-        if (bitset.num_bits() == 0 || bitset.data() == nullptr) {
+        if (bitset.num_bits() == 0 || (!bitset.enumerable() && bitset.data() == nullptr)) {
             return;
         }
 

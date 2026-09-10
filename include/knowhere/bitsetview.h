@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -37,6 +38,60 @@ namespace knowhere {
 // in the backend vector domain used by the selector.
 class BitsetView {
  public:
+    using ReadUnsetFn = size_t (*)(const void*, size_t&, int32_t*, size_t);
+    using EnsureDenseFn = const uint8_t* (*)(const void*);
+
+    // Representation-neutral, immutable owner. Each consumer supplies its own
+    // cursor position; no query state is stored in the shared filter.
+    static BitsetView
+    FromEnumerable(std::shared_ptr<const void> owner, const void* context, size_t universe, size_t filtered,
+                   ReadUnsetFn read, EnsureDenseFn dense) {
+        if (!owner || !context || !read || !dense || filtered > universe) {
+            throw std::invalid_argument("Invalid enumerable filter view");
+        }
+        BitsetView view(nullptr, universe, filtered);
+        view.owner_ = std::move(owner);
+        view.context_ = context;
+        view.read_unset_ = read;
+        view.ensure_dense_ = dense;
+        return view;
+    }
+
+    bool
+    enumerable() const {
+        return read_unset_ != nullptr && bits_ == nullptr && !has_out_ids() && id_offset_ == 0;
+    }
+
+    size_t
+    read_unset(size_t& cursor, int32_t* output, size_t capacity) const {
+        if (!enumerable()) {
+            throw std::logic_error("Filter does not support direct enumeration");
+        }
+        return read_unset_(context_, cursor, output, capacity);
+    }
+
+    void
+    EnsureDense() {
+        if (bits_ == nullptr && ensure_dense_ != nullptr) {
+            bits_ = ensure_dense_(context_);
+        }
+    }
+
+    // A byte-aligned compatibility slice must retain an owned lazy bitmap,
+    // including after the original view (or its derived wrapper) is gone.
+    BitsetView
+    DenseSubview(size_t offset, size_t length) const {
+        if (has_out_ids() || id_offset_ != 0 || (offset & 7) != 0 || offset > num_bits_ ||
+            length > num_bits_ - offset) {
+            throw std::invalid_argument("Invalid raw bitmap subview");
+        }
+        if (length == 0) {
+            return {};
+        }
+        BitsetView view(data() + (offset >> 3), length);
+        view.owner_ = owner_;
+        return view;
+    }
     BitsetView() = default;
     ~BitsetView() = default;
 
@@ -91,7 +146,7 @@ class BitsetView {
 
     const uint8_t*
     data() const {
-        return bits_;
+        return bits_ != nullptr || ensure_dense_ == nullptr ? bits_ : ensure_dense_(context_);
     }
 
     // Recomputes filter counters for a backend id range.
@@ -137,6 +192,9 @@ class BitsetView {
         if (out_ids_count > out_ids.size()) {
             throw std::invalid_argument("out ids count exceeds out ids size");
         }
+        if (out_ids_count != 0) {
+            EnsureDense();
+        }
         out_ids_ = out_ids;
         out_ids_count_ = out_ids_count;
     }
@@ -153,6 +211,9 @@ class BitsetView {
 
     void
     set_id_offset(size_t id_offset) {
+        if (id_offset != 0) {
+            EnsureDense();
+        }
         id_offset_ = id_offset;
     }
 
@@ -179,7 +240,7 @@ class BitsetView {
             }
             out_id = static_cast<size_t>(mapped_id);
         }
-        return out_id >= num_bits_ || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
+        return out_id >= num_bits_ || (data()[out_id >> 3] & (0x1 << (out_id & 0x7)));
     }
 
     float
@@ -318,6 +379,11 @@ class BitsetView {
     void
     count_filtered_bits_impl_(size_t bit_offset, size_t bit_count, bool has_valid_bitmap, ValidByteAt valid_byte_at,
                               ValidWordAt valid_word_at) {
+        if (enumerable() && bit_offset == 0 && bit_count == num_bits_ && !has_valid_bitmap) {
+            vector_count_ = num_bits_;
+            return;
+        }
+        EnsureDense();
         if (bits_ == nullptr || num_bits_ == 0 || bit_count == 0 || bit_offset >= num_bits_) {
             set_vector_count(0);
             set_filter_count(0);
@@ -419,7 +485,7 @@ class BitsetView {
         }
 
         const size_t byte_offset = word_index * sizeof(uint64_t);
-        const auto* data = bits_ + byte_offset;
+        const auto* data = this->data() + byte_offset;
         const size_t remaining_bytes = bytes - byte_offset;
         if (remaining_bytes >= sizeof(uint64_t)) {
             return load_u64_unaligned_(data);
@@ -448,7 +514,7 @@ class BitsetView {
             return false;
         }
         for (size_t word_index = first_word + 1; word_index < last_word; ++word_index) {
-            if (load_u64_unaligned_(bits_ + (word_index << 3)) != ~uint64_t{0}) {
+            if (load_u64_unaligned_(data() + (word_index << 3)) != ~uint64_t{0}) {
                 return false;
             }
         }
@@ -467,6 +533,10 @@ class BitsetView {
     }
 
     const uint8_t* bits_ = nullptr;
+    std::shared_ptr<const void> owner_;
+    const void* context_ = nullptr;
+    ReadUnsetFn read_unset_ = nullptr;
+    EnsureDenseFn ensure_dense_ = nullptr;
     size_t num_bits_ = 0;
     // Backend-vector count used as the filter-ratio denominator.
     size_t vector_count_ = 0;

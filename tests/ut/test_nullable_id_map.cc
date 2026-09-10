@@ -5141,3 +5141,37 @@ TEST_CASE("Nullable native matrix covers every IndexNode operation", "[nullable]
         }
     }
 }
+
+TEST_CASE("Preparing an identity-domain enumerable filter does not build Dense", "[filtermap][enumerable]") {
+    struct Payload {
+        std::vector<int32_t> ids{128, 3, 0};
+        std::vector<uint8_t> dense = std::vector<uint8_t>(17, 0xff);
+        size_t dense_calls = 0;
+    };
+    auto owner = std::make_shared<Payload>();
+    const auto* context = owner.get();
+    auto view = knowhere::BitsetView::FromEnumerable(
+        owner, context, 129, 126,
+        [](const void* p, size_t& cursor, int32_t* output, size_t capacity) {
+            const auto& ids = static_cast<const Payload*>(p)->ids;
+            const auto count = std::min(capacity, ids.size() - cursor);
+            std::copy_n(ids.data() + cursor, count, output);
+            cursor += count;
+            return count;
+        },
+        [](const void* p) -> const uint8_t* {
+            auto& payload = *const_cast<Payload*>(static_cast<const Payload*>(p));
+            ++payload.dense_calls;
+            for (auto id : payload.ids) {
+                payload.dense[id >> 3] &= ~(uint8_t{1} << (id & 7));
+            }
+            return payload.dense.data();
+        });
+    CapturingBitsetFakeIndexNode node(129, 8);
+    // Non-nullable vectors have no public-to-compact map or validity mask.
+    auto prepared = node.PrepareBitset(view);
+    REQUIRE(prepared.has_value());
+    REQUIRE(prepared.value().bitset.enumerable());
+    REQUIRE(prepared.value().bitset.count() == 126);
+    REQUIRE(owner->dense_calls == 0);
+}
