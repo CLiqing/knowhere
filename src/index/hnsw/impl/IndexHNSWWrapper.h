@@ -29,9 +29,11 @@ struct SearchParametersHNSWWrapper : public faiss::cppcontrib::knowhere::SearchP
     knowhere::feder::hnsw::FederResult* feder = nullptr;
     // filtering parameter
     float kAlpha = 1.0f;
-    // Full TurboQuant query-side integer scoring controls.
-    uint8_t tq_query_bits = 0;
-    bool tq_int_qjl = false;
+    // Returns a query-local DC in public metric units, also used by BF.
+    virtual faiss::DistanceComputer*
+    storage_distance_computer(const faiss::Index* index) const {
+        return index->get_distance_computer();
+    }
 
     inline ~SearchParametersHNSWWrapper() {
     }

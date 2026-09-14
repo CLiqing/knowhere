@@ -212,11 +212,13 @@ class FaissHnswTurboQuantConfig : public FaissHnswConfig {
             .description("TurboQuant query bits; zero selects the floating-point scoring path")
             .set_default(0)
             .set_range(0, 8)
-            .for_search();
+            .for_search()
+            .for_range_search();
         KNOWHERE_CONFIG_DECLARE_FIELD(tq_int_qjl)
             .description("use integer scoring for the TurboQuant QJL stage")
             .set_default(false)
-            .for_search();
+            .for_search()
+            .for_range_search();
     }
 
     Status
@@ -228,6 +230,37 @@ class FaissHnswTurboQuantConfig : public FaissHnswConfig {
         if ((param_type == PARAM_TYPE::SEARCH || param_type == PARAM_TYPE::RANGE_SEARCH) &&
             tq_int_qjl.value_or(false) && tq_query_bits.value_or(0) == 0) {
             return HandleError(err_msg, "tq_int_qjl requires tq_query_bits greater than zero", Status::invalid_args);
+        }
+        return Status::success;
+    }
+};
+
+class FaissHnswTurboQuantMseConfig : public FaissHnswTurboQuantConfig {
+ public:
+    KNOWHERE_DECLARE_CONFIG(FaissHnswTurboQuantMseConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(tq_bits)
+            .description("TurboQuant MSE database bits per dimension: 1, 2, 3, 4 or 8")
+            .set_default(2)
+            .set_range(1, 8)
+            .for_train()
+            .for_static();
+    }
+
+    Status
+    CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto status = FaissHnswTurboQuantConfig::CheckAndAdjust(param_type, err_msg);
+        if (status != Status::success) {
+            return status;
+        }
+        if (tq_query_bits.value_or(0) != 0 || tq_int_qjl.value_or(false)) {
+            return HandleError(err_msg, "TQ-MSE does not support Full TQ query quantization parameters",
+                               Status::invalid_args);
+        }
+        if (tq_bits.has_value()) {
+            const auto bits = tq_bits.value();
+            if (bits != 1 && bits != 2 && bits != 3 && bits != 4 && bits != 8) {
+                return HandleError(err_msg, "TurboQuant MSE bits must be one of {1, 2, 3, 4, 8}", Status::invalid_args);
+            }
         }
         return Status::success;
     }

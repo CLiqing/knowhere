@@ -9,6 +9,8 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <faiss/IndexPreTransform.h>
+#include <faiss/VectorTransform.h>
 #include <faiss/cppcontrib/knowhere/IndexBinaryScalarQuantizer.h>
 #include <faiss/cppcontrib/knowhere/IndexCosine.h>
 #include <faiss/cppcontrib/knowhere/IndexFlat.h>
@@ -20,8 +22,6 @@
 #include <faiss/cppcontrib/knowhere/impl/additional_io.h>
 #include <faiss/cppcontrib/knowhere/utils/Bitset.h>
 #include <faiss/utils/Heap.h>
-#include <faiss/IndexPreTransform.h>
-#include <faiss/VectorTransform.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -48,6 +48,7 @@
 #include "index/hnsw/impl/IndexConditionalWrapper.h"
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include "index/hnsw/impl/IndexWrapperCosine.h"
+#include "index/hnsw/impl/TurboQuantSearchParameters.h"
 #include "index/refine/refine_utils.h"
 #include "io/memory_io.h"
 #include "knowhere/bitsetview_idselector.h"
@@ -1157,6 +1158,11 @@ class FaissHnswIterator : public IndexIterator {
 //
 class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
  public:
+    virtual std::unique_ptr<SearchParametersHNSWWrapper>
+    CreateSearchParameters(const FaissHnswConfig&) const {
+        return std::make_unique<SearchParametersHNSWWrapper>();
+    }
+
     BaseFaissRegularIndexHNSWNode(const int32_t& version, const Object& object, DataFormatEnum data_format_in)
         : BaseFaissRegularIndexNode(version, object), data_format{data_format_in} {
     }
@@ -1361,7 +1367,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         const auto rows = dataset->GetRows();
         const auto* data = dataset->GetTensor();
 
-        const auto hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
+        const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
         const auto k = hnsw_cfg.k.value();
 
         BitsetView bitset(bitset_);
@@ -1414,13 +1420,10 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         faiss::Index* index_wrapper_ptr = index_wrapper.get();
 
         // set up faiss search parameters
-        knowhere::SearchParametersHNSWWrapper hnsw_search_params;
+        auto search_parameters = CreateSearchParameters(hnsw_cfg);
+        auto& hnsw_search_params = *search_parameters;
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
-        }
-        if (const auto* tq_cfg = dynamic_cast<const FaissHnswTurboQuantConfig*>(cfg.get()); tq_cfg != nullptr) {
-            hnsw_search_params.tq_query_bits = static_cast<uint8_t>(tq_cfg->tq_query_bits.value_or(0));
-            hnsw_search_params.tq_int_qjl = tq_cfg->tq_int_qjl.value_or(false);
         }
 
         // do not collect HNSW stats
@@ -1666,7 +1669,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         const auto rows = dataset->GetRows();
         const auto* data = dataset->GetTensor();
 
-        const auto hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
+        const auto& hnsw_cfg = static_cast<const FaissHnswConfig&>(*cfg);
         BitsetView bitset(bitset_);
         auto index_id = getIndexToSearchByScalarInfo(bitset);
         if (index_id < 0) {
@@ -1711,14 +1714,11 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         faiss::Index* index_wrapper_ptr = index_wrapper.get();
 
         // set up faiss search parameters
-        knowhere::SearchParametersHNSWWrapper hnsw_search_params;
+        auto search_parameters = CreateSearchParameters(hnsw_cfg);
+        auto& hnsw_search_params = *search_parameters;
 
         if (hnsw_cfg.ef.has_value()) {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
-        }
-        if (const auto* tq_cfg = dynamic_cast<const FaissHnswTurboQuantConfig*>(cfg.get()); tq_cfg != nullptr) {
-            hnsw_search_params.tq_query_bits = static_cast<uint8_t>(tq_cfg->tq_query_bits.value_or(0));
-            hnsw_search_params.tq_int_qjl = tq_cfg->tq_int_qjl.value_or(false);
         }
 
         // do not collect HNSW stats
@@ -3048,6 +3048,31 @@ class BaseFaissRegularIndexHNSWPQNodeTemplate : public BaseFaissRegularIndexHNSW
 // the storage only after graph construction has completed.
 class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSWNode {
  public:
+    expected<std::vector<IndexNode::IteratorPtr>>
+    AnnIterator(const DataSetPtr, std::unique_ptr<Config>, const BitsetView&, bool, milvus::OpContext*) const override {
+        return expected<std::vector<IndexNode::IteratorPtr>>::Err(
+            Status::not_implemented, "HNSW TurboQuant iterator does not yet support the outer rotation");
+    }
+
+    expected<DataSetPtr>
+    RangeSearch(const DataSetPtr, std::unique_ptr<Config>, const BitsetView&, milvus::OpContext*) const override {
+        // The common range path uses the iterator. Do not expose a filter-dependent
+        // partial implementation that only works when brute force is selected.
+        return expected<DataSetPtr>::Err(Status::not_implemented, "HNSW TurboQuant range search is not implemented");
+    }
+
+    std::unique_ptr<SearchParametersHNSWWrapper>
+    CreateSearchParameters(const FaissHnswConfig& cfg) const override {
+        if (tq_mse_) {
+            return std::make_unique<SearchParametersHNSWWrapper>();
+        }
+        const auto& tq_cfg = static_cast<const FaissHnswTurboQuantConfig&>(cfg);
+        auto params = std::make_unique<SearchParametersHNSWTurboQuant>();
+        params->query_bits = static_cast<uint8_t>(tq_cfg.tq_query_bits.value_or(0));
+        params->int_qjl = tq_cfg.tq_int_qjl.value_or(false);
+        return params;
+    }
+
     BaseFaissRegularIndexHNSWTurboQuantNode(const int32_t& version, const Object& object, DataFormatEnum data_format,
                                             bool tq_mse = false)
         : BaseFaissRegularIndexHNSWNode(version, object, data_format), tq_mse_(tq_mse) {
@@ -3077,14 +3102,18 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
     GetTurboQuantType(int bits, bool tq_mse) {
         if (tq_mse) {
             switch (bits) {
+                case 1:
+                    return faiss::ScalarQuantizer::QT_1bit_tqmse;
                 case 2:
                     return faiss::ScalarQuantizer::QT_2bit_tqmse;
                 case 3:
                     return faiss::ScalarQuantizer::QT_3bit_tqmse;
                 case 4:
                     return faiss::ScalarQuantizer::QT_4bit_tqmse;
+                case 8:
+                    return faiss::ScalarQuantizer::QT_8bit_tqmse;
                 default:
-                    KNOWHERE_THROW_MSG("TurboQuant MSE bits must be in [2, 4]");
+                    KNOWHERE_THROW_MSG("TurboQuant MSE bits must be one of {1, 2, 3, 4, 8}");
             }
         }
         switch (bits) {
@@ -3212,6 +3241,12 @@ class BaseFaissRegularIndexHNSWTurboQuantNode : public BaseFaissRegularIndexHNSW
             for (int64_t row = 0; row < dataset->GetRows(); row += kRotationBatchRows) {
                 const auto rows = std::min(kRotationBatchRows, dataset->GetRows() - row);
                 tmp_rr->apply_noalloc(rows, data + row * dataset->GetDim(), rotated.data());
+                // TQ-MSE's fixed codebook describes unit vectors. Normalize
+                // only the private encoding scratch for COSINE; the caller's
+                // data and FP32 graph construction remain untouched.
+                if (tq_mse_ && faiss::cppcontrib::knowhere::is_cosine_index(tmp_index_tq.get())) {
+                    knowhere::NormalizeVecs(rotated.data(), rows, dataset->GetDim());
+                }
                 tmp_index_tq->add(rows, rotated.data());
             }
 
@@ -3282,7 +3317,12 @@ class BaseFaissRegularIndexHNSWTurboQuantMseNodeTemplate : public BaseFaissRegul
 
     static std::unique_ptr<BaseConfig>
     StaticCreateConfig() {
-        return std::make_unique<FaissHnswTurboQuantConfig>();
+        return std::make_unique<FaissHnswTurboQuantMseConfig>();
+    }
+
+    std::unique_ptr<BaseConfig>
+    CreateConfig() const override {
+        return StaticCreateConfig();
     }
 
     static bool

@@ -11,9 +11,7 @@
 
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 
-#include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetricType.h>
-#include <faiss/cppcontrib/knowhere/IndexCosine.h>
 #include <faiss/cppcontrib/knowhere/IndexHNSW.h>
 #include <faiss/cppcontrib/knowhere/MetricType.h>
 #include <faiss/cppcontrib/knowhere/impl/Bruteforce.h>
@@ -49,31 +47,15 @@ namespace {
 
 // cloned from IndexHNSW.cpp
 faiss::DistanceComputer*
-storage_distance_computer(const faiss::Index* storage) {
+storage_distance_computer(const faiss::Index* storage, const SearchParametersHNSWWrapper* params) {
+    auto dis = std::unique_ptr<faiss::DistanceComputer>(params ? params->storage_distance_computer(storage)
+                                                               : storage->get_distance_computer());
     if (faiss::cppcontrib::knowhere::is_similarity_metric(storage->metric_type)) {
-        return new faiss::NegativeDistanceComputer(storage->get_distance_computer());
-    } else {
-        return storage->get_distance_computer();
+        auto negative = std::make_unique<faiss::NegativeDistanceComputer>(dis.get());
+        dis.release();
+        return negative.release();
     }
-}
-
-void
-configure_turboquant_distance_computer(faiss::DistanceComputer* dis, const SearchParametersHNSWWrapper* params) {
-    if (params == nullptr || dis == nullptr) {
-        return;
-    }
-
-    if (auto* negative = dynamic_cast<faiss::NegativeDistanceComputer*>(dis); negative != nullptr) {
-        dis = negative->basedis;
-    }
-    if (auto* cosine = dynamic_cast<faiss::cppcontrib::knowhere::WithCosineNormDistanceComputer*>(dis);
-        cosine != nullptr) {
-        dis = cosine->basedis.get();
-    }
-    if (auto* turboquant = dynamic_cast<faiss::ScalarQuantizer::TurboQuantRefine::DistanceComputer*>(dis);
-        turboquant != nullptr) {
-        turboquant->configure(params->tq_query_bits, params->tq_int_qjl);
-    }
+    return dis.release();
 }
 
 }  // namespace
@@ -139,8 +121,7 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
-    configure_turboquant_distance_computer(dis.get(), params);
+    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage, params));
 
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
@@ -293,8 +274,7 @@ IndexHNSWWrapper::range_search(idx_t n, const float* __restrict x, float radius_
         faiss::cppcontrib::knowhere::Bitset::create_uninitialized(index->ntotal);
 
     // create a distance computer
-    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage));
-    configure_turboquant_distance_computer(dis.get(), params);
+    std::unique_ptr<faiss::DistanceComputer> dis(storage_distance_computer(index_hnsw->storage, params));
 
     // radius
     float radius = radius_in;
