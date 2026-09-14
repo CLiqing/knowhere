@@ -131,6 +131,8 @@ namespace diskann {
     uint32_t inline_pq = 0;
     bool rearrange = false;
     int num_entry_points = 0;
+    // Retain prepared navigation vectors for an external codec to encode.
+    bool keep_preprocessed_base = false;
   };
 
   template<typename T>

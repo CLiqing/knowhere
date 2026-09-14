@@ -1889,7 +1889,8 @@ template<typename T>
     std::chrono::duration<double> diff = e - s;
     LOG_KNOWHERE_INFO_ << "Indexing time: " << diff.count();
 
-    if (config.compare_metric == diskann::Metric::INNER_PRODUCT) {
+    if (config.compare_metric == diskann::Metric::INNER_PRODUCT &&
+        !config.keep_preprocessed_base) {
       std::remove(data_file_to_use.c_str());
     }
     std::remove(mem_index_path.c_str());

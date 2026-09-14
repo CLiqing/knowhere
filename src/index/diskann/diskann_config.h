@@ -13,6 +13,7 @@
 #define DISKANN_CONFIG_H
 
 #include "diskann/defaults.h"
+#include "index/turboquant/turboquant_utils.h"
 #include "knowhere/config.h"
 
 namespace knowhere {
@@ -26,6 +27,11 @@ constexpr const CFG_INT::value_type kDefaultSearchListSizeForBuild = 128;
 
 class DiskANNConfig : public BaseConfig {
  public:
+    CFG_STRING navigation_codec;
+    CFG_INT navigation_bits;
+    CFG_FLOAT navigation_code_budget_gb;
+    CFG_INT navigation_query_bits;
+    CFG_BOOL navigation_int_qjl;
     // This is the degree of the graph index, typically between 60 and 150. Larger R will result in larger indices and
     // longer indexing times, but better search quality.
     CFG_INT max_degree;
@@ -85,6 +91,15 @@ class DiskANNConfig : public BaseConfig {
     // use PQ + Refine. Default to -1.0f, negative vlaues will use dynamic threshold calculator given topk.
     CFG_FLOAT filter_threshold;
     KNOWHERE_DECLARE_CONFIG(DiskANNConfig) {
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_codec).set_default("PQ").for_train().for_deserialize().for_static();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_bits).set_default(4).set_range(1, 8).for_train().for_deserialize();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_code_budget_gb)
+            .set_default(0)
+            .set_range(0, std::numeric_limits<CFG_FLOAT::value_type>::max())
+            .for_train()
+            .for_deserialize();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_query_bits).set_default(0).set_range(0, 8).for_search();
+        KNOWHERE_CONFIG_DECLARE_FIELD(navigation_int_qjl).set_default(false).for_search();
         KNOWHERE_CONFIG_DECLARE_FIELD(max_degree)
             .description("the degree of the graph index.")
             .set_default(48)
@@ -168,6 +183,25 @@ class DiskANNConfig : public BaseConfig {
 
     Status
     CheckAndAdjust(PARAM_TYPE param_type, std::string* err_msg) override {
+        const auto codec = navigation_codec.value_or("PQ");
+        if (codec != "PQ" && codec != "TQ" && codec != "TQ_MSE") {
+            return HandleError(err_msg, "navigation_codec must be PQ, TQ or TQ_MSE", Status::invalid_args);
+        }
+        if (codec != "PQ") {
+            const auto m = metric_type.value_or("L2");
+            if ((m != "L2" && m != "IP" && m != "COSINE") || (codec == "TQ_MSE" && m == "L2")) {
+                return HandleError(err_msg, "unsupported TQ navigation metric", Status::invalid_metric_type);
+            }
+            if (!turboquant::ValidBits(codec == "TQ_MSE", navigation_bits.value_or(4))) {
+                return HandleError(err_msg, "invalid TQ navigation bits", Status::invalid_args);
+            }
+            if (disk_pq_dims.value_or(0) != 0) {
+                return HandleError(err_msg, "TQ navigation requires uncompressed SSD vectors", Status::not_implemented);
+            }
+        }
+        if (navigation_query_bits.value_or(0) == 0 && navigation_int_qjl.value_or(false)) {
+            return HandleError(err_msg, "integer QJL requires nonzero query bits", Status::invalid_args);
+        }
         switch (param_type) {
             case PARAM_TYPE::TRAIN: {
                 if (!search_list_size.has_value()) {

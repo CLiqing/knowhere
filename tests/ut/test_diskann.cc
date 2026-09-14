@@ -9,6 +9,10 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <faiss/IndexPreTransform.h>
+#include <faiss/IndexScalarQuantizer.h>
+#include <faiss/VectorTransform.h>
+#include <faiss/utils/distances.h>
 #include <sys/resource.h>
 
 #include <atomic>
@@ -24,6 +28,8 @@
 #include "filemanager/FileManager.h"
 #include "filemanager/impl/LocalFileManager.h"
 #include "index/diskann/diskann_config.h"
+#include "index/diskann/tq_navigation_store.h"
+#include "index/turboquant/turboquant_utils.h"
 #include "knowhere/comp/brute_force.h"
 #include "knowhere/comp/knowhere_check.h"
 #include "knowhere/expected.h"
@@ -125,6 +131,137 @@ TEST_CASE("Valid diskann build params test", "[diskann]") {
         REQUIRE(diskCfg.pq_code_budget_gb == std::max(pq_code_budget_gb, 1.0f * ratio));
         REQUIRE(diskCfg.search_cache_budget_gb == std::max(search_cache_budget_gb, 1.0f * ratio));
     }
+}
+
+TEST_CASE("DiskANN TQ sidecar matches the Faiss codec", "[diskann_turboquant]") {
+    auto temp = (fs::temp_directory_path() / "knowhere-tq-sidecar-XXXXXX").string();
+    REQUIRE(mkdtemp(temp.data()) != nullptr);
+    INFO(temp);
+    constexpr int nb = 128, d = 33;
+    auto data = GenDataSet(nb, d, 731);
+    auto* xb = const_cast<float*>(static_cast<const float*>(data->GetTensor()));
+    faiss::fvec_renorm_L2(d, nb, xb);
+    const auto raw = temp + "/raw.fbin";
+    WriteRawDataToDisk<float>(raw, xb, nb, d);
+    faiss::RandomRotationMatrix rr(d, d);
+    rr.init(12345);
+    std::vector<float> encoded(nb * d), query(d);
+    rr.apply_noalloc(nb, xb, encoded.data());
+    rr.apply_noalloc(1, xb + d, query.data());
+    unsigned ids[5] = {0, 1, 17, 53, 91};
+    for (bool mse : {false, true})
+        for (int bits : (mse ? std::vector<int>{1, 2, 3, 4, 8} : std::vector<int>{2, 3, 4, 5})) {
+            CAPTURE(mse, bits);
+            const auto file = temp + "/" + std::to_string(mse) + "_" + std::to_string(bits);
+            knowhere::TQNavigationStore::Build(raw, file, mse, bits, "IP", 0);
+            knowhere::TQNavigationStore store(file, mse, bits, "IP");
+            REQUIRE(store.Count() == nb);
+            REQUIRE(store.Dimension() == d);
+            REQUIRE(store.MemorySize() > size_t(nb * d / 8));
+            faiss::IndexScalarQuantizer ref(d, knowhere::turboquant::QuantizerType(mse, bits), faiss::METRIC_L2);
+            ref.train(nb, encoded.data());
+            ref.add(nb, encoded.data());
+            auto expected = std::unique_ptr<faiss::DistanceComputer>(ref.get_distance_computer());
+            expected->set_query(query.data());
+            auto dc = store.CreateDistanceComputer();
+            dc->set_query(xb + d);
+            float distances[5];
+            dc->compute_distances(ids, 5, distances);
+            for (int j = 0; j < 5; ++j) {
+                REQUIRE(distances[j] == Catch::Approx((*expected)(ids[j])).margin(1e-4));
+            }
+            REQUIRE_THROWS(knowhere::TQNavigationStore(file, mse, bits, "COSINE"));
+            REQUIRE_THROWS(knowhere::TQNavigationStore(file, !mse, bits, "IP"));
+            if (!mse)
+                for (int qb : {4, 8}) {
+                    auto* full =
+                        dynamic_cast<faiss::ScalarQuantizer::TurboQuantRefine::DistanceComputer*>(expected.get());
+                    full->configure(qb, true);
+                    full->set_query(query.data());
+                    auto quantized = store.CreateDistanceComputer(qb, true);
+                    quantized->set_query(xb + d);
+                    quantized->compute_distances(ids, 5, distances);
+                    for (int j = 0; j < 5; ++j) REQUIRE(distances[j] == Catch::Approx((*full)(ids[j])).margin(1e-4));
+                }
+            fs::resize_file(file, 24);
+            REQUIRE_THROWS(knowhere::TQNavigationStore(file, mse, bits, "IP"));
+        }
+}
+
+TEST_CASE("DiskANN TQ metrics filtering cache and PQ fallback", "[diskann_turboquant]") {
+    auto temp = (fs::temp_directory_path() / "knowhere-tq-disk-XXXXXX").string();
+    REQUIRE(mkdtemp(temp.data()) != nullptr);
+    INFO(temp);
+    constexpr int nb = 1024, d = 33, nq = 3, k = 10;
+    auto base = GenDataSet(nb, d, 623);
+    auto query = GenDataSet(nq, d, 182);
+    auto* xb = const_cast<float*>(static_cast<const float*>(base->GetTensor()));
+    auto* xq = const_cast<float*>(static_cast<const float*>(query->GetTensor()));
+    // Non-unit inputs: public IP/COSINE semantics must survive DiskANN's prepared space.
+    for (int i = 0; i < nb * d; ++i) xb[i] /= 50;
+    for (int i = 0; i < nq * d; ++i) xq[i] /= 50;
+    const auto raw = temp + "/raw.fbin";
+    WriteRawDataToDisk<float>(raw, xb, nb, d);
+    std::shared_ptr<milvus::FileManager> fm = std::make_shared<milvus::LocalFileManager>();
+    auto pack = knowhere::Pack(fm);
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    for (const std::string metric : {"L2", "IP", "COSINE"})
+        for (const std::string codec : {"TQ", "TQ_MSE"}) {
+            if (metric == "L2" && codec == "TQ_MSE")
+                continue;
+            CAPTURE(metric, codec);
+            auto prefix = temp + "/" + metric + "_" + codec;
+            knowhere::Json cfg = {{"dim", d},
+                                  {"metric_type", metric},
+                                  {"index_prefix", prefix},
+                                  {"data_path", raw},
+                                  {"max_degree", 24},
+                                  {"search_list_size", 64},
+                                  {"pq_code_budget_gb", 0.000008},
+                                  {"build_dram_budget_gb", 1.0},
+                                  {"search_cache_budget_gb", 0.0},
+                                  {"beamwidth", 4},
+                                  {"k", k},
+                                  {"navigation_codec", codec},
+                                  {"navigation_bits", 4},
+                                  {"num_build_thread", 1}};
+            auto index = knowhere::IndexFactory::Instance().Create<float>("DISKANN", version, pack).value();
+            REQUIRE(index.Build(nullptr, cfg) == knowhere::Status::success);
+            knowhere::BinarySet binary;
+            REQUIRE(index.Serialize(binary) == knowhere::Status::success);
+            // Nonzero cache budget with default use_bfs_cache=false must not call PQ-only async search.
+            cfg["search_cache_budget_gb"] = 0.000002;
+            cfg["warm_up"] = true;
+            REQUIRE(index.Deserialize(binary, cfg) == knowhere::Status::success);
+            REQUIRE(index.Count() == nb);
+            REQUIRE(index.Size() > 0);
+            cfg["search_list_size"] = 256;
+            for (int masked : {0, 1000}) {
+                std::vector<uint8_t> mask(nb / 8, 0);
+                for (int i = 0; i < masked; ++i) mask[i / 8] |= 1u << (i % 8);
+                knowhere::BitsetView filter(mask.data(), nb);
+                auto result = index.Search(query, cfg, filter);
+                REQUIRE(result.has_value());
+                for (int q = 0; q < nq; ++q)
+                    for (int j = 0; j < k; ++j) {
+                        const auto id = result.value()->GetIds()[q * k + j];
+                        REQUIRE(id >= masked);
+                        REQUIRE(id < nb);
+                        const float *b = xb + id * d, *a = xq + q * d;
+                        float expected =
+                            metric == "L2" ? faiss::fvec_L2sqr(a, b, d) : faiss::fvec_inner_product(a, b, d);
+                        if (metric == "COSINE")
+                            expected /= std::sqrt(faiss::fvec_norm_L2sqr(a, d) * faiss::fvec_norm_L2sqr(b, d));
+                        REQUIRE(result.value()->GetDistance()[q * k + j] == Catch::Approx(expected).margin(0.002));
+                    }
+            }
+            cfg["navigation_codec"] = "PQ";
+            cfg["search_cache_budget_gb"] = 0;
+            cfg["warm_up"] = false;
+            auto pq = knowhere::IndexFactory::Instance().Create<float>("DISKANN", version, pack).value();
+            REQUIRE(pq.Deserialize(binary, cfg) == knowhere::Status::success);
+            REQUIRE(pq.Search(query, cfg, nullptr).has_value());
+        }
 }
 
 TEST_CASE("Invalid diskann params test", "[diskann]") {

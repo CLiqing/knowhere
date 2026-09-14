@@ -12,6 +12,7 @@
 #include "knowhere/feder/DiskANN.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -23,6 +24,7 @@
 #include "filemanager/FileManager.h"
 #include "fmt/core.h"
 #include "index/diskann/diskann_config.h"
+#include "index/diskann/tq_navigation_store.h"
 #include "knowhere/comp/index_param.h"
 #include "knowhere/context.h"
 #include "knowhere/dataset.h"
@@ -200,7 +202,7 @@ class DiskANNIndexNode : public IndexNode {
             LOG_KNOWHERE_ERROR_ << "Diskann not loaded.";
             return 0;
         }
-        return pq_flash_index_->cal_size();
+        return pq_flash_index_->cal_size() + (tq_navigation_store_ ? tq_navigation_store_->MemorySize() : 0);
     }
 
     int64_t
@@ -283,6 +285,7 @@ class DiskANNIndexNode : public IndexNode {
     std::atomic_bool is_prepared_;
     std::shared_ptr<milvus::FileManager> file_manager_;
     std::unique_ptr<diskann::PQFlashIndex<DataType>> pq_flash_index_;
+    std::unique_ptr<TQNavigationStore> tq_navigation_store_;
     std::atomic_int64_t dim_;
     std::atomic_int64_t count_;
     std::shared_ptr<ThreadPool> search_pool_;
@@ -408,7 +411,7 @@ AnyIndexFileExist(const std::string& index_prefix) {
         return false;
     };
     return file_exist(GetNecessaryFilenames(index_prefix, diskann::INNER_PRODUCT, true, true)) ||
-           file_exist(GetOptionalFilenames(index_prefix));
+           file_exist(GetOptionalFilenames(index_prefix)) || file_exists(TQNavigationStore::Filename(index_prefix));
 }
 
 inline bool
@@ -432,6 +435,9 @@ Status
 DiskANNIndexNode<DataType>::Build(const DataSetPtr dataset, std::shared_ptr<Config> cfg, bool use_knowhere_build_pool) {
     assert(file_manager_ != nullptr);
     auto build_conf = static_cast<const DiskANNConfig&>(*cfg);
+    const bool use_tq = build_conf.navigation_codec.value_or("PQ") != "PQ";
+    if (use_tq && !std::is_same_v<DataType, float>)
+        return Status::not_implemented;
     if (!CheckMetric(build_conf.metric_type.value())) {
         LOG_KNOWHERE_ERROR_ << "Invalid metric type: " << build_conf.metric_type.value();
         return Status::invalid_metric_type;
@@ -493,12 +499,29 @@ DiskANNIndexNode<DataType>::Build(const DataSetPtr dataset, std::shared_ptr<Conf
                                                        build_conf.accelerate_build.value(),
                                                        static_cast<uint32_t>(num_nodes_to_cache),
                                                        build_conf.shuffle_build.value()};
+    diskann_internal_build_config.keep_preprocessed_base = use_tq;
     RETURN_IF_ERROR(TryDiskANNCall([&]() {
         int res = diskann::build_disk_index<DataType>(diskann_internal_build_config);
         if (res != 0)
             throw diskann::ANNException("diskann::build_disk_index returned non-zero value: " + std::to_string(res),
                                         -1);
     }));
+
+    if (use_tq) {
+        const auto source = need_norm ? index_prefix_ + "_prepped_base.bin" : data_path;
+        const auto sidecar = TQNavigationStore::Filename(index_prefix_);
+        RETURN_IF_ERROR(TryDiskANNCall([&] {
+            TQNavigationStore::Build(source, sidecar, build_conf.navigation_codec.value() == "TQ_MSE",
+                                     build_conf.navigation_bits.value(), build_conf.metric_type.value(),
+                                     build_conf.navigation_code_budget_gb.value_or(0));
+        }));
+        if (!AddFile(sidecar))
+            return Status::disk_file_error;
+        if (need_norm) {
+            std::error_code error;
+            std::filesystem::remove(source, error);
+        }
+    }
 
     // Add file to the file manager
     for (auto& filename : GetNecessaryFilenames(index_prefix_, need_norm, true, true)) {
@@ -587,6 +610,9 @@ template <typename DataType>
 Status
 DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr<Config> cfg) {
     auto prep_conf = static_cast<const DiskANNConfig&>(*cfg);
+    const bool use_tq = prep_conf.navigation_codec.value_or("PQ") != "PQ";
+    if (use_tq && !std::is_same_v<DataType, float>)
+        return Status::not_implemented;
     if (!CheckMetric(prep_conf.metric_type.value())) {
         return Status::invalid_metric_type;
     }
@@ -613,7 +639,8 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
 
     // Load file from file manager.
     for (auto& filename : GetNecessaryFilenames(
-             index_prefix_, need_norm, prep_conf.search_cache_budget_gb.value() > 0 && !prep_conf.use_bfs_cache.value(),
+             index_prefix_, need_norm,
+             prep_conf.search_cache_budget_gb.value() > 0 && !prep_conf.use_bfs_cache.value() && !use_tq,
              prep_conf.warm_up.value())) {
         if (!LoadFile(filename)) {
             return Status::disk_file_error;
@@ -630,6 +657,22 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
         }
     }
 
+    tq_navigation_store_.reset();
+    if (use_tq) {
+        const auto sidecar = TQNavigationStore::Filename(index_prefix_);
+        if (!LoadFile(sidecar))
+            return Status::disk_file_error;
+        RETURN_IF_ERROR(TryDiskANNCall([&] {
+            tq_navigation_store_ =
+                std::make_unique<TQNavigationStore>(sidecar, prep_conf.navigation_codec.value() == "TQ_MSE",
+                                                    prep_conf.navigation_bits.value(), prep_conf.metric_type.value());
+            const auto budget = prep_conf.navigation_code_budget_gb.value_or(0);
+            if (budget > 0 && tq_navigation_store_->MemorySize() > budget * 1024 * 1024 * 1024) {
+                throw std::invalid_argument("loaded TQ navigation exceeds memory budget");
+            }
+        }));
+    }
+
     // set thread pool
     search_pool_ = ThreadPool::GetGlobalSearchThreadPool();
 
@@ -640,7 +683,7 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
 
     pq_flash_index_ = std::make_unique<diskann::PQFlashIndex<DataType>>(reader, diskann_metric);
     auto disk_ann_call = [&]() {
-        int res = pq_flash_index_->load(search_pool_->size(), index_prefix_.c_str());
+        int res = pq_flash_index_->load(search_pool_->size(), index_prefix_.c_str(), !use_tq);
         if (res != 0) {
             throw diskann::ANNException("pq_flash_index_->load returned non-zero value: " + std::to_string(res), -1);
         }
@@ -650,6 +693,9 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
         return Status::diskann_inner_error;
     }
 
+    if (tq_navigation_store_ && (tq_navigation_store_->Count() != pq_flash_index_->get_num_points() ||
+                                 tq_navigation_store_->Dimension() != pq_flash_index_->get_data_dim()))
+        return Status::invalid_index_error;
     count_.store(pq_flash_index_->get_num_points());
     // DiskANN will add one more dim for IP type.
     if (is_ip) {
@@ -678,9 +724,9 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
             num_nodes_to_cache = GetCachedNodeNum(prep_conf.search_cache_budget_gb.value(), disk_pq_nchunks,
                                                   sizeof(_u8), prep_conf.max_degree.value());
         } else {
-            num_nodes_to_cache =
-                GetCachedNodeNum(prep_conf.search_cache_budget_gb.value(), pq_flash_index_->get_data_dim(),
-                                 sizeof(DataType), prep_conf.max_degree.value());
+            num_nodes_to_cache = GetCachedNodeNum(
+                prep_conf.search_cache_budget_gb.value(), pq_flash_index_->get_data_dim(), sizeof(DataType),
+                use_tq ? pq_flash_index_->get_max_degree() : prep_conf.max_degree.value());
         }
         if (num_nodes_to_cache > pq_flash_index_->get_num_points() / 3) {
             LOG_KNOWHERE_ERROR_ << "Failed to generate cache, num_nodes_to_cache(" << num_nodes_to_cache
@@ -689,7 +735,7 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
         }
         if (num_nodes_to_cache > 0) {
             LOG_KNOWHERE_INFO_ << "Caching " << num_nodes_to_cache << " sample nodes around medoid(s).";
-            if (prep_conf.use_bfs_cache.value()) {
+            if (prep_conf.use_bfs_cache.value() || use_tq) {
                 LOG_KNOWHERE_INFO_ << "Use bfs to generate cache list";
                 if (TryDiskANNCall([&]() { pq_flash_index_->cache_bfs_levels(num_nodes_to_cache, node_list); }) !=
                     Status::success) {
@@ -739,9 +785,11 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, std::shared_ptr
         futures.reserve(warmup_num);
         for (uint64_t i = 0; i < warmup_num; ++i) {
             futures.emplace_back(search_pool_->push([&, index = i]() {
+                auto navigation = tq_navigation_store_ ? tq_navigation_store_->CreateDistanceComputer() : nullptr;
                 pq_flash_index_->cached_beam_search(warmup + (index * warmup_aligned_dim), 1, warmup_L,
                                                     warmup_result_ids_64.data() + (index * 1),
-                                                    warmup_result_dists.data() + (index * 1), 4);
+                                                    warmup_result_dists.data() + (index * 1), 4, false, nullptr,
+                                                    nullptr, nullptr, -1.0f, navigation.get());
             }));
         }
 
@@ -833,6 +881,10 @@ template <typename DataType>
 expected<std::vector<IndexNode::IteratorPtr>>
 DiskANNIndexNode<DataType>::AnnIterator(const DataSetPtr dataset, std::unique_ptr<Config> cfg, const BitsetView& bitset,
                                         bool use_knowhere_search_pool, milvus::OpContext* op_context) const {
+    if (tq_navigation_store_) {
+        return expected<std::vector<IndexNode::IteratorPtr>>::Err(Status::not_implemented,
+                                                                  "TQ navigation iterator is not implemented");
+    }
     if (!is_prepared_.load() || !pq_flash_index_) {
         LOG_KNOWHERE_ERROR_ << "Failed to load diskann.";
         return expected<std::vector<IndexNode::IteratorPtr>>::Err(Status::empty_index, "DiskANN not loaded");
@@ -905,6 +957,10 @@ DiskANNIndexNode<DataType>::Search(const DataSetPtr dataset, std::unique_ptr<Con
                                                  search_conf.search_list_size.value(), search_conf.beamwidth.value());
     }
 
+    if ((!tq_navigation_store_ || tq_navigation_store_->IsMse()) &&
+        (search_conf.navigation_query_bits.value_or(0) != 0 || search_conf.navigation_int_qjl.value_or(false))) {
+        return expected<DataSetPtr>::Err(Status::invalid_args, "query quantization requires Full TQ navigation");
+    }
     auto p_id = std::make_unique<int64_t[]>(k * nq);
     auto p_dist = std::make_unique<DistType[]>(k * nq);
 
@@ -914,9 +970,13 @@ DiskANNIndexNode<DataType>::Search(const DataSetPtr dataset, std::unique_ptr<Con
         futures.emplace_back(search_pool_->push([&, index = row, p_id_ptr = p_id.get(), p_dist_ptr = p_dist.get()]() {
             knowhere::checkCancellation(op_context);
             diskann::QueryStats stats;
+            auto navigation = tq_navigation_store_ ? tq_navigation_store_->CreateDistanceComputer(
+                                                         search_conf.navigation_query_bits.value_or(0),
+                                                         search_conf.navigation_int_qjl.value_or(false))
+                                                   : nullptr;
             pq_flash_index_->cached_beam_search(xq + (index * dim), k, lsearch, p_id_ptr + (index * k),
                                                 p_dist_ptr + (index * k), beamwidth, false, &stats, feder_result,
-                                                bitset_, filter_ratio);
+                                                bitset_, filter_ratio, navigation.get());
 #ifdef NOT_COMPILE_FOR_SWIG
             knowhere_diskann_search_hops.Observe(stats.n_hops);
 #endif
