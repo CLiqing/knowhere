@@ -128,7 +128,8 @@ class IvfTurboQuantNode : public IndexNode {
                 chain->prepend_transform(norm.get());
                 norm.release();
             }
-            ThreadPool::ScopedBuildOmpSetter omp(cfg.num_build_thread.value_or(1));
+            ThreadPool::ScopedBuildOmpSetter omp(
+                cfg.num_build_thread.value_or(ThreadPool::GetGlobalBuildThreadPool()->size()));
             chain->train(data->GetRows(), static_cast<const float*>(data->GetTensor()));
             index_ = std::move(chain);
             return Status::success;
@@ -152,7 +153,8 @@ class IvfTurboQuantNode : public IndexNode {
             return Status::invalid_args;
         }
         try {
-            ThreadPool::ScopedBuildOmpSetter omp(static_cast<const BaseConfig&>(*cfg).num_build_thread.value_or(1));
+            ThreadPool::ScopedBuildOmpSetter omp(static_cast<const BaseConfig&>(*cfg).num_build_thread.value_or(
+                ThreadPool::GetGlobalBuildThreadPool()->size()));
             index_->add(data->GetRows(), static_cast<const float*>(data->GetTensor()));
             return Status::success;
         } catch (const std::exception& e) {

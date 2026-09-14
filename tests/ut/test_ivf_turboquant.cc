@@ -118,3 +118,33 @@ TEST_CASE("IVF TurboQuant rejects unsupported combinations", "[ivf_turboquant]")
         REQUIRE(index.Build(base, cfg) == knowhere::Status::invalid_metric_type);
     }
 }
+
+TEST_CASE("IVF TurboQuant supports the fp16 and bf16 mock adapters", "[ivf_turboquant]") {
+    auto check = []<typename T>() {
+        auto base = knowhere::ConvertToDataTypeIfNeeded<T>(GenDataSet(128, 33, 149));
+        auto query = knowhere::ConvertToDataTypeIfNeeded<T>(GenDataSet(2, 33, 151));
+        const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+        for (const auto* type : {"IVF_TURBOQUANT", "IVF_TQMSE"}) {
+            CAPTURE(type);
+            knowhere::Json cfg = {{"dim", 33},   {"metric_type", "COSINE"}, {"nlist", 4}, {"nprobe", 4}, {"k", 10},
+                                  {"tq_bits", 4}};
+            auto index = knowhere::IndexFactory::Instance().Create<T>(type, version).value();
+            REQUIRE(index.Build(base, cfg) == knowhere::Status::success);
+            auto result = index.Search(query, cfg, nullptr);
+            REQUIRE(result.has_value());
+            knowhere::BinarySet binary;
+            REQUIRE(index.Serialize(binary) == knowhere::Status::success);
+            auto loaded = knowhere::IndexFactory::Instance().Create<T>(type, version).value();
+            REQUIRE(loaded.Deserialize(binary, cfg) == knowhere::Status::success);
+            auto roundtrip = loaded.Search(query, cfg, nullptr);
+            REQUIRE(roundtrip.has_value());
+            for (int i = 0; i < 20; ++i) {
+                REQUIRE(std::isfinite(result.value()->GetDistance()[i]));
+                REQUIRE(result.value()->GetIds()[i] == roundtrip.value()->GetIds()[i]);
+                REQUIRE(result.value()->GetDistance()[i] == roundtrip.value()->GetDistance()[i]);
+            }
+        }
+    };
+    check.template operator()<knowhere::fp16>();
+    check.template operator()<knowhere::bf16>();
+}
