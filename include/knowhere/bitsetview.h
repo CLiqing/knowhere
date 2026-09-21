@@ -13,6 +13,7 @@
 #define BITSET_H
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -27,6 +28,7 @@
 
 #include "knowhere/array_store.h"
 #include "knowhere/candidate_evaluator.h"
+#include "knowhere/candidate_evaluator_worker.h"
 
 namespace knowhere {
 
@@ -203,6 +205,37 @@ class BitsetView {
     filter_ratio() const {
         auto current_size = size();
         return current_size == 0 ? 0.0f : ((float)count() / current_size);
+    }
+
+    // Batch form of test: bit i is set when backend ID ids[i] is excluded.
+    // The caller owns a query-private worker from candidate_evaluator(). Bitmap
+    // counts remain mandatory-only; an all-visible bitmap still runs callback.
+    uint64_t
+    test(const int32_t* ids, uint32_t count, CandidateEvaluatorWorker* worker) const {
+        const auto lanes = CandidateEvaluatorWorker::LaneMask(count);
+        if ((count != 0 && ids == nullptr) || (candidate_evaluator_ != nullptr && worker == nullptr)) {
+            throw std::invalid_argument("ann_fusing: invalid batch IDs/worker");
+        }
+        uint64_t active = 0;
+        std::array<int32_t, 64> rows;
+        for (uint32_t lane = 0; lane < count; ++lane) {
+            if (ids[lane] < 0 || (num_bits_ != 0 && test(ids[lane]))) {
+                continue;
+            }
+            size_t row = static_cast<size_t>(ids[lane]) + id_offset_;
+            if (has_out_ids()) {
+                if (row >= out_ids_count_ || out_ids_[row] < 0) {
+                    continue;
+                }
+                row = static_cast<size_t>(out_ids_[row]);
+            }
+            if (candidate_evaluator_ != nullptr && row > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                throw std::out_of_range("ann_fusing: segment row exceeds callback ID domain");
+            }
+            rows[lane] = static_cast<int32_t>(row);
+            active |= uint64_t{1} << lane;
+        }
+        return candidate_evaluator_ == nullptr ? lanes & ~active : worker->test(rows.data(), count, active);
     }
 
     // Return whether every backend id in [begin, end) is filtered.
