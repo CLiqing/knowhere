@@ -147,13 +147,18 @@ PrepareBitsetForInternalRange(BitsetView& bitset, size_t num_internal_ids, size_
     if (bitset.has_out_ids()) {
         return;
     }
-    if (bitset.empty() || bitset.data() == nullptr) {
+    if (bitset.empty()) {
         return;
     }
 
     // Local chunk ids use a contiguous public-id offset when no map is present.
     bitset.set_id_offset(internal_id_offset);
-    bitset.count_filtered_bits(internal_id_offset, num_internal_ids);
+    if (bitset.mandatory_data() != nullptr) {
+        bitset.count_filtered_bits(internal_id_offset, num_internal_ids);
+    } else {
+        bitset.set_vector_count(num_internal_ids);
+        bitset.set_filter_count(0);
+    }
 }
 
 Status

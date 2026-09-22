@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -28,7 +29,7 @@
 
 #include "knowhere/array_store.h"
 #include "knowhere/candidate_evaluator.h"
-#include "knowhere/candidate_evaluator_worker.h"
+#include "knowhere/candidate_evaluator_execution.h"
 
 namespace knowhere {
 
@@ -52,13 +53,35 @@ class BitsetView {
 
     // Separate, non-owning search predicate attachment. Bitmap operations and
     // counts describe mandatory exclusions only; they never evaluate this
-    // predicate. Only an explicitly capable backend may consume this view.
+    // predicate. Bind once at each independent CPU search-task boundary.
     void
     set_candidate_evaluator(const CandidateEvaluatorViewV1* evaluator) {
         if (evaluator != nullptr && !evaluator->valid()) {
             throw std::invalid_argument("invalid candidate evaluator V1");
         }
         candidate_evaluator_ = evaluator;
+        execution_.reset();
+    }
+
+    // Copies the immutable filter description, creating fresh execution state
+    // for ONE independent search task. Subsequent copies belong to that same
+    // task and retain its state; never share a bound filter across query tasks.
+    BitsetView
+    bind() const {
+        auto result = *this;
+        result.execution_ = candidate_evaluator_ == nullptr
+            ? nullptr : std::make_shared<CandidateEvaluatorExecution>(*candidate_evaluator_);
+        return result;
+    }
+
+    bool
+    bound() const {
+        return candidate_evaluator_ == nullptr || execution_ != nullptr;
+    }
+
+    size_t
+    callback_batches() const {
+        return execution_ ? execution_->batch_calls : 0;
     }
 
     const CandidateEvaluatorViewV1*
@@ -68,6 +91,9 @@ class BitsetView {
 
     bool
     empty() const {
+        if (candidate_evaluator_ != nullptr) {
+            return false;
+        }
         if (num_bits_ == 0) {
             return true;
         }
@@ -110,6 +136,16 @@ class BitsetView {
 
     const uint8_t*
     data() const {
+        if (candidate_evaluator_ != nullptr) {
+            throw std::logic_error("dynamic filter cannot be consumed as a complete raw bitmap");
+        }
+        return bits_;
+    }
+
+    // Transport for an adapter that ALSO preserves candidate_evaluator(). This
+    // is not the complete predicate bitmap and must not replace test().
+    const uint8_t*
+    mandatory_data() const {
         return bits_;
     }
 
@@ -183,6 +219,19 @@ class BitsetView {
     // Returns true when a backend id should be skipped.
     bool
     test(int64_t index) const {
+        if (candidate_evaluator_ != nullptr) {
+            if (index < 0 || index > std::numeric_limits<int32_t>::max()) {
+                return true;
+            }
+            const int32_t id = static_cast<int32_t>(index);
+            return test(&id, 1) != 0;
+        }
+        return test_mandatory(index);
+    }
+
+    // Counts and bit addressing refer ONLY to already materialized exclusions.
+    bool
+    test_mandatory(int64_t index) const {
         if (index < 0) {
             return true;
         }
@@ -198,6 +247,9 @@ class BitsetView {
             }
             out_id = static_cast<size_t>(mapped_id);
         }
+        if (num_bits_ == 0) {
+            return vector_count_ != 0 && internal_id >= vector_count_;
+        }
         return out_id >= num_bits_ || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
     }
 
@@ -208,18 +260,18 @@ class BitsetView {
     }
 
     // Batch form of test: bit i is set when backend ID ids[i] is excluded.
-    // The caller owns a query-private worker from candidate_evaluator(). Bitmap
-    // counts remain mandatory-only; an all-visible bitmap still runs callback.
+    // The bound filter owns its private execution state. Bitmap counts remain
+    // mandatory-only; an all-visible bitmap still runs the callback.
     uint64_t
-    test(const int32_t* ids, uint32_t count, CandidateEvaluatorWorker* worker) const {
-        const auto lanes = CandidateEvaluatorWorker::LaneMask(count);
-        if ((count != 0 && ids == nullptr) || (candidate_evaluator_ != nullptr && worker == nullptr)) {
-            throw std::invalid_argument("ann_fusing: invalid batch IDs/worker");
+    test(const int32_t* ids, uint32_t count) const {
+        const auto lanes = CandidateEvaluatorExecution::LaneMask(count);
+        if ((count != 0 && ids == nullptr) || !bound()) {
+            throw std::invalid_argument("ann_fusing: invalid batch IDs or unbound filter");
         }
         uint64_t active = 0;
         std::array<int32_t, 64> rows;
         for (uint32_t lane = 0; lane < count; ++lane) {
-            if (ids[lane] < 0 || (num_bits_ != 0 && test(ids[lane]))) {
+            if (test_mandatory(ids[lane])) {
                 continue;
             }
             size_t row = static_cast<size_t>(ids[lane]) + id_offset_;
@@ -235,7 +287,7 @@ class BitsetView {
             rows[lane] = static_cast<int32_t>(row);
             active |= uint64_t{1} << lane;
         }
-        return candidate_evaluator_ == nullptr ? lanes & ~active : worker->test(rows.data(), count, active);
+        return candidate_evaluator_ == nullptr ? lanes & ~active : execution_->test(rows.data(), count, active);
     }
 
     // Return whether every backend id in [begin, end) is filtered.
@@ -248,7 +300,7 @@ class BitsetView {
         }
 
         // Mapped ids require per-id tests.
-        if (has_out_ids()) {
+        if (has_out_ids() || candidate_evaluator_ != nullptr) {
             for (size_t index = begin; index < end; ++index) {
                 if (!test(index)) {
                     return false;
@@ -278,7 +330,7 @@ class BitsetView {
         }
 
         // Mapped ids require per-id tests.
-        if (has_out_ids()) {
+        if (has_out_ids() || candidate_evaluator_ != nullptr) {
             size_t index = std::min(upper_bound, size());
             while (index > 0) {
                 --index;
@@ -317,7 +369,7 @@ class BitsetView {
     // Return the first unfiltered backend id.
     size_t
     get_first_valid_index() const {
-        if (has_out_ids()) {
+        if (has_out_ids() || candidate_evaluator_ != nullptr) {
             for (size_t i = 0; i < size(); i++) {
                 if (!test(i)) {
                     return i;
@@ -517,6 +569,7 @@ class BitsetView {
     }
 
     const CandidateEvaluatorViewV1* candidate_evaluator_ = nullptr;
+    std::shared_ptr<CandidateEvaluatorExecution> execution_;
     const uint8_t* bits_ = nullptr;
     size_t num_bits_ = 0;
     // Backend-vector count used as the filter-ratio denominator.

@@ -165,13 +165,6 @@ class IndexNode : public Object {
     Search(const DataSetPtr dataset, std::unique_ptr<Config> cfg, const BitsetView& bitset,
            milvus::OpContext* op_context = nullptr) const = 0;
 
-    // Development capability, checked on the loaded backend, not its public
-    // index name. Default rejects opaque predicates. No cost planning here.
-    virtual bool
-    SupportsAnnFusingDemo() const {
-        return false;
-    }
-
     /**
      * @brief Computes exact distances for ids already in the base-vector storage domain.
      *
@@ -306,7 +299,7 @@ class IndexNode : public Object {
         if (bitset.num_bits() == 0) {
             return prepared;
         }
-        if (bitset.data() == nullptr) {
+        if (bitset.mandatory_data() == nullptr) {
             const auto msg = std::string("bitset data is null while bitset size is non-zero");
             LOG_KNOWHERE_ERROR_ << msg;
             return expected<PreparedBitset>::Err(Status::invalid_args, msg);
@@ -627,8 +620,9 @@ class IndexNode : public Object {
     void
     CalcBitsetCount(BitsetView& bitset, const IdMap& id_map, size_t offset = 0,
                     size_t bitset_count = std::numeric_limits<size_t>::max()) const {
-        // Exact filter counts are reported in the backend vector domain.
-        if (bitset.num_bits() == 0 || bitset.data() == nullptr) {
+        // Exact MANDATORY counts are reported in the backend vector domain.
+        // This projection retains the callback; it does not evaluate residuals.
+        if (bitset.num_bits() == 0 || bitset.mandatory_data() == nullptr) {
             return;
         }
 
@@ -651,7 +645,7 @@ class IndexNode : public Object {
                     return true;
                 }
                 const auto bit = static_cast<size_t>(out_id);
-                return bit >= bitset.num_bits() || bit_is_set(bitset.data(), bit);
+                return bit >= bitset.num_bits() || bit_is_set(bitset.mandatory_data(), bit);
             };
 
             const auto& in_to_out_ids = id_map.InToOutIds();

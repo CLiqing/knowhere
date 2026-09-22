@@ -8,11 +8,13 @@
 
 namespace knowhere {
 
-// One search worker owns one opaque, mutable producer workspace. Neither the
-// backend nor this adapter knows expressions or scalar types. Not a DSO ABI.
-class CandidateEvaluatorWorker {
+// Private execution state owned by a bound filter, not by a search algorithm.
+// One independent search task binds once; all its test() calls reuse this state.
+// Neither this adapter nor the backend knows expressions or scalar types.
+// Not a DSO ABI: only CandidateEvaluatorViewV1 crosses the callback boundary.
+class CandidateEvaluatorExecution {
  public:
-    explicit CandidateEvaluatorWorker(const CandidateEvaluatorViewV1& view) : view_(view) {
+    explicit CandidateEvaluatorExecution(const CandidateEvaluatorViewV1& view) : view_(view) {
         if (!view_.valid() || view_.create_worker(view_.context, &worker_) != CandidateEvalStatus::Success ||
             worker_ == nullptr) {
             if (worker_ != nullptr && view_.valid()) {
@@ -21,9 +23,9 @@ class CandidateEvaluatorWorker {
             throw std::runtime_error("ann_fusing: candidate workspace preparation failed");
         }
     }
-    ~CandidateEvaluatorWorker() { view_.destroy_worker(worker_); }
-    CandidateEvaluatorWorker(const CandidateEvaluatorWorker&) = delete;
-    CandidateEvaluatorWorker& operator=(const CandidateEvaluatorWorker&) = delete;
+    ~CandidateEvaluatorExecution() { view_.destroy_worker(worker_); }
+    CandidateEvaluatorExecution(const CandidateEvaluatorExecution&) = delete;
+    CandidateEvaluatorExecution& operator=(const CandidateEvaluatorExecution&) = delete;
 
     static uint64_t LaneMask(uint32_t count) {
         if (count > 64) {

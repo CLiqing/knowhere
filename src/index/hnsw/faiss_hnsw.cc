@@ -444,7 +444,7 @@ class BaseFaissRegularIndexNode : public BaseFaissIndexNode {
             LOG_KNOWHERE_WARNING_ << "partition key value not correctly set";
             return -1;
         }
-        size_t first_valid_index = bitset.get_first_valid_index();
+        size_t first_valid_index = bitset.bind().get_first_valid_index();
         if (first_valid_index >= label_to_internal_offset.size()) {
             return 0;
         }
@@ -978,7 +978,7 @@ class FaissHnswIterator : public IndexIterator {
         workspace.search_params.sel = nullptr;
 
         // set up a bitset for filtering database points that we traverse
-        workspace.bitset = bitset_in;
+        workspace.bitset = bitset_in.bind();
 
         // initial search starts as 'not done'
         workspace.initial_search_done = false;
@@ -1424,11 +1424,6 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         // set up kAlpha
         hnsw_search_params.kAlpha = bitset.filter_ratio() * 0.7f;
 
-        // set up a selector
-        BitsetViewIDSelector bw_idselector(bitset);
-        faiss::IDSelector* id_selector = !bitset.empty() ? &bw_idselector : nullptr;
-        hnsw_search_params.sel = id_selector;
-
         // run
         auto ids = std::make_unique<faiss::idx_t[]>(rows * k);
         auto distances = std::make_unique<float[]>(rows * k);
@@ -1442,6 +1437,9 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                                                      index_wrapper_ptr = index_wrapper_ptr,
                                                      bf_index_wrapper_ptr = bf_index_wrapper_ptr]() {
                     knowhere::checkCancellation(op_context);
+                    BitsetViewIDSelector selector(bitset.bind());
+                    auto task_params = hnsw_search_params;
+                    task_params.sel = bitset.empty() ? nullptr : &selector;
                     // 1 thread per element
                     ThreadPool::ScopedSearchOmpSetter setter(1);
 
@@ -1485,17 +1483,17 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                         refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
                         // a refine procedure itself does not need to care about filtering
                         refine_params.sel = nullptr;
-                        refine_params.base_index_params = &hnsw_search_params;
+                        refine_params.base_index_params = &task_params;
 
                         index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
                         if (bf_search_needed()) {
                             bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
                         }
                     } else {
-                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &hnsw_search_params);
+                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &task_params);
                         if (bf_search_needed()) {
                             bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids,
-                                                         &hnsw_search_params);
+                                                         &task_params);
                         }
                     }
 
@@ -1718,11 +1716,6 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         // set up kAlpha
         hnsw_search_params.kAlpha = bitset.filter_ratio() * 0.7f;
 
-        // set up a selector
-        BitsetViewIDSelector bw_idselector(bitset);
-        faiss::IDSelector* id_selector = !bitset.empty() ? &bw_idselector : nullptr;
-        hnsw_search_params.sel = id_selector;
-
         ////////////////////////////////////////////////////////////////
         // run
         std::vector<std::vector<int64_t>> result_id_array(rows);
@@ -1740,6 +1733,9 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                 futs.emplace_back(
                     search_pool->push([&, idx = i, is_refined = is_refined, index_wrapper_ptr = index_wrapper_ptr] {
                         knowhere::checkCancellation(op_context);
+                        BitsetViewIDSelector selector(bitset.bind());
+                        auto task_params = hnsw_search_params;
+                        task_params.sel = bitset.empty() ? nullptr : &selector;
                         // 1 thread per element
                         ThreadPool::ScopedSearchOmpSetter setter(1);
 
@@ -1763,11 +1759,11 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                             refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
                             // a refine procedure itself does not need to care about filtering
                             refine_params.sel = nullptr;
-                            refine_params.base_index_params = &hnsw_search_params;
+                            refine_params.base_index_params = &task_params;
 
                             index_wrapper_ptr->range_search(1, cur_query, radius, &res, &refine_params);
                         } else {
-                            index_wrapper_ptr->range_search(1, cur_query, radius, &res, &hnsw_search_params);
+                            index_wrapper_ptr->range_search(1, cur_query, radius, &res, &task_params);
                         }
 
                         // post-process
