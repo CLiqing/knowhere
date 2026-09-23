@@ -229,7 +229,9 @@ class BitsetView {
         return test_mandatory(index);
     }
 
-    // Counts and bit addressing refer ONLY to already materialized exclusions.
+ private:
+    // Internal prefilter only: true means excluded by mandatory visibility.
+    // Does not evaluate the callback and is NOT a complete predicate test.
     bool
     test_mandatory(int64_t index) const {
         if (index < 0) {
@@ -253,6 +255,7 @@ class BitsetView {
         return out_id >= num_bits_ || (bits_[out_id >> 3] & (0x1 << (out_id & 0x7)));
     }
 
+ public:
     float
     filter_ratio() const {
         auto current_size = size();
