@@ -523,12 +523,10 @@ inline expected<DataSetPtr>
 Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& bitset_,
                  milvus::OpContext* op_context) const noexcept {
     return GuardedCall([&]() -> expected<DataSetPtr> {
-        // Staged rollout: the transport contract is available, but native and
-        // Cardinal consumers are adapted separately. In particular, a backend's
-        // count()==0/raw-bitmap shortcut must not bypass a deferred predicate.
-        if (!bitset_.is_bitmap()) {
-            return expected<DataSetPtr>::Err(Status::not_implemented,
-                                             "Search consumers are not yet adapted for deferred filters");
+        // PrepareBitset remains the execution boundary: unadapted consumers
+        // reject deferred input before entering any raw-bitmap fast path.
+        if (!bitset_.is_bitmap() && this->node == nullptr) {
+            return expected<DataSetPtr>::Err(Status::not_implemented, "deferred search requires a loaded consumer");
         }
         auto cfg = this->node->CreateConfig();
         std::string msg;
