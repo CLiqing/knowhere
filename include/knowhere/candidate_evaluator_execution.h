@@ -3,8 +3,10 @@
 #pragma once
 
 #include <bit>
+#include <array>
 #include <cstddef>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "knowhere/candidate_evaluator.h"
 
@@ -53,15 +55,53 @@ class CandidateEvaluatorExecution {
         if (active == 0) {
             return lanes;
         }
-        uint64_t accepted = 0;
-        if (view_.eval_batch(worker_, ids, count, active, &accepted) != CandidateEvalStatus::Success) {
-            throw std::runtime_error("candidate callback failed");
+        // Query-local public-row verdicts, not group OR results or mandatory
+        // visibility. Values 0/1 are resolved; 2..65 name an in-flight lane.
+        // Keep the producer's batch interface and deduplicate misses within
+        // the same batch as well as across successive test() calls.
+        uint64_t accepted = 0, pending = 0, missing = 0;
+        std::array<uint8_t, 64> source_lane;
+        try {
+            for (auto remaining = active; remaining != 0; remaining &= remaining - 1) {
+                const auto lane = std::countr_zero(remaining);
+                const auto [entry, inserted] = verdicts_.try_emplace(ids[lane], static_cast<uint8_t>(lane + 2));
+                if (inserted) {
+                    missing |= uint64_t{1} << lane;
+                }
+                if (entry->second < 2) {
+                    accepted |= uint64_t{entry->second} << lane;
+                } else {
+                    pending |= uint64_t{1} << lane;
+                    source_lane[lane] = entry->second - 2;
+                }
+            }
+            if (missing != 0) {
+                uint64_t produced = 0;
+                if (view_.eval_batch(worker_, ids, count, missing, &produced) != CandidateEvalStatus::Success) {
+                    throw std::runtime_error("candidate callback failed");
+                }
+                if ((produced & ~missing) != 0) {
+                    throw std::runtime_error("candidate callback returned inactive lanes");
+                }
+                for (auto remaining = missing; remaining != 0; remaining &= remaining - 1) {
+                    const auto lane = std::countr_zero(remaining);
+                    verdicts_.find(ids[lane])->second = (produced >> lane) & 1;
+                }
+                for (auto remaining = pending; remaining != 0; remaining &= remaining - 1) {
+                    const auto lane = std::countr_zero(remaining);
+                    accepted |= ((produced >> source_lane[lane]) & 1) << lane;
+                }
+                ++batch_calls;
+                rows += std::popcount(missing);
+            }
+        } catch (...) {
+            // Errors are not FALSE. Remove this batch's provisional entries so
+            // a caller that handles an error cannot observe unresolved verdicts.
+            for (auto remaining = missing; remaining != 0; remaining &= remaining - 1) {
+                verdicts_.erase(ids[std::countr_zero(remaining)]);
+            }
+            throw;
         }
-        if ((accepted & ~active) != 0) {
-            throw std::runtime_error("candidate callback returned inactive lanes");
-        }
-        ++batch_calls;
-        rows += std::popcount(active);
         return lanes & ~accepted;
     }
 
@@ -72,5 +112,6 @@ class CandidateEvaluatorExecution {
  private:
     CandidateEvaluatorView view_;
     void* worker_ = nullptr;
+    std::unordered_map<int32_t, uint8_t> verdicts_;
 };
 }  // namespace knowhere
