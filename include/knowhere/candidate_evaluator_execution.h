@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include <bit>
+#include <folly/container/F14Map.h>
+
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <stdexcept>
-#include <unordered_map>
 
 #include "knowhere/candidate_evaluator.h"
 
@@ -55,11 +56,13 @@ class CandidateEvaluatorExecution {
         if (active == 0) {
             return lanes;
         }
-        // Query-local public-row verdicts, not group OR results or mandatory
-        // visibility. Values 0/1 are resolved; 2..65 name an in-flight lane.
-        // Keep the producer's batch interface and deduplicate misses within
-        // the same batch as well as across successive test() calls.
-        uint64_t accepted = 0, pending = 0, missing = 0;
+        // Reserve for the whole batch before retaining value pointers: F14
+        // stores values inline, so rehash must not move them during insertion.
+        verdicts_.reserve(verdicts_.size() + std::popcount(active));
+        // Values 0/1 are final public-row verdicts; 2..65 name the first lane
+        // of a same-batch miss. Group OR and mandatory visibility stay outside.
+        uint64_t accepted = 0, missing = 0, duplicates = 0;
+        std::array<uint8_t*, 64> slots;
         std::array<uint8_t, 64> source_lane;
         try {
             for (auto remaining = active; remaining != 0; remaining &= remaining - 1) {
@@ -67,11 +70,11 @@ class CandidateEvaluatorExecution {
                 const auto [entry, inserted] = verdicts_.try_emplace(ids[lane], static_cast<uint8_t>(lane + 2));
                 if (inserted) {
                     missing |= uint64_t{1} << lane;
-                }
-                if (entry->second < 2) {
+                    slots[lane] = &entry->second;
+                } else if (entry->second < 2) {
                     accepted |= uint64_t{entry->second} << lane;
                 } else {
-                    pending |= uint64_t{1} << lane;
+                    duplicates |= uint64_t{1} << lane;
                     source_lane[lane] = entry->second - 2;
                 }
             }
@@ -85,9 +88,12 @@ class CandidateEvaluatorExecution {
                 }
                 for (auto remaining = missing; remaining != 0; remaining &= remaining - 1) {
                     const auto lane = std::countr_zero(remaining);
-                    verdicts_.find(ids[lane])->second = (produced >> lane) & 1;
+                    *slots[lane] = (produced >> lane) & 1;
                 }
-                for (auto remaining = pending; remaining != 0; remaining &= remaining - 1) {
+                accepted |= produced;
+                // Only duplicates need positional restoration. First misses
+                // already occupy their original lanes in the producer result.
+                for (auto remaining = duplicates; remaining != 0; remaining &= remaining - 1) {
                     const auto lane = std::countr_zero(remaining);
                     accepted |= ((produced >> source_lane[lane]) & 1) << lane;
                 }
@@ -106,12 +112,12 @@ class CandidateEvaluatorExecution {
     }
 
     size_t batch_calls = 0;
-    // Successful producer active lanes, not distinct IDs or all input lanes.
+    // Successfully evaluated distinct public rows in this independent task.
     size_t rows = 0;
 
  private:
     CandidateEvaluatorView view_;
     void* worker_ = nullptr;
-    std::unordered_map<int32_t, uint8_t> verdicts_;
+    folly::F14ValueMap<int32_t, uint8_t> verdicts_;
 };
 }  // namespace knowhere
