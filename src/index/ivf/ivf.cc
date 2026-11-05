@@ -68,6 +68,11 @@ struct IndexDispatch<faiss::cppcontrib::knowhere::IndexIVFFlat> {
 template <typename DataType, typename IndexType>
 class IvfIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     IvfIndexNode(const int32_t version, const Object& object) : IndexNode(version), index_(nullptr) {
         static_assert(std::is_same_v<IndexType, faiss::cppcontrib::knowhere::IndexIVFFlat> ||
                           std::is_same_v<IndexType, faiss::cppcontrib::knowhere::IndexIVFFlatCC> ||

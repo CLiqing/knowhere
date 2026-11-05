@@ -53,6 +53,11 @@ using FaissBase = std::conditional_t<std::is_same_v<DataType, fp32>, faiss::Inde
 template <typename DataType>
 class FaissIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     static_assert(std::is_same_v<DataType, fp32> || std::is_same_v<DataType, bin1>,
                   "FaissIndexNode supports only fp32 and bin1");
 

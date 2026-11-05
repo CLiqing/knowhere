@@ -72,6 +72,11 @@ struct KnowhereConfigType<cuvs_proto::cuvs_index_kind::cagra> {
 
 template <typename DataType, cuvs_proto::cuvs_index_kind K>
 struct GpuCuvsIndexNode : public IndexNode {
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     auto static constexpr index_kind = K;
     using knowhere_config_type = typename KnowhereConfigType<index_kind>::Type;
     using data_type = typename cuvs_knowhere::cuvs_data_type_mapper<DataType>::data_type;

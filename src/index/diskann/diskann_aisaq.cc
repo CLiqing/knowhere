@@ -34,6 +34,11 @@ class AisaqIndexNode : public IndexNode {
                   "AiSAQ only support floating point data type(float32, float16, bfloat16)");
 
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     using DistType = float;
 
     AisaqIndexNode(const int32_t& version, const Object& object)

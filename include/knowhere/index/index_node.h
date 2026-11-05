@@ -327,24 +327,27 @@ class IndexNode : public Object {
         return false;
     }
 
-    // Projects a public-id bitset to the backend id domain.
+    // Prepares the common filter transport without evaluating its predicate or
+    // binding a worker. Bitmap-only consumers use PrepareBitmapOnly() instead.
     virtual expected<PreparedBitset>
     PrepareBitset(BitsetView bitset) const {
-        // This is a transport foundation release, not a backend rollout.
-        // In particular, the legacy num_bits()==0 early return below is not a
-        // valid callback-only preparation. Reject instead of losing projection.
-        if (!bitset.is_bitmap()) {
+        if (!bitset.is_bitmap() && emb_list_offset_ != nullptr) {
             return expected<PreparedBitset>::Err(Status::not_implemented,
-                                                 "Backend filter preparation is not yet adapted for deferred filters");
+                                                 "Deferred embedding-list projection is not yet qualified");
         }
         PreparedBitset prepared(bitset);
         const auto& id_map = GetIdMap();
         // A sealed validity bitmap may omit trailing NULL rows. Keep the caller's
         // query boundary even when it extends beyond the represented valid IDs.
         if (bitset.num_bits() == 0) {
+            if (!bitset.is_bitmap()) {
+                PrepareBitsetMap(prepared, id_map);
+                prepared.bitset.set_vector_count(static_cast<size_t>(Count()));
+                prepared.bitset.set_filter_count(0);
+            }
             return prepared;
         }
-        if (bitset.data() == nullptr) {
+        if (bitset.mandatory_data() == nullptr) {
             const auto msg = std::string("bitset data is null while bitset size is non-zero");
             LOG_KNOWHERE_ERROR_ << msg;
             return expected<PreparedBitset>::Err(Status::invalid_args, msg);
@@ -491,6 +494,17 @@ class IndexNode : public Object {
     }
 
  protected:
+    // Representation guard for consumers that still access a complete bitmap.
+    // This is not a fusing policy/capability preflight and never evaluates Expr.
+    expected<PreparedBitset>
+    PrepareBitmapOnly(BitsetView bitset) const {
+        if (!bitset.is_bitmap()) {
+            return expected<PreparedBitset>::Err(Status::not_implemented,
+                                                 "Backend filter preparation is not yet adapted for deferred filters");
+        }
+        return IndexNode::PrepareBitset(bitset);
+    }
+
     // Retrieve vectors by ids already in this node's base-vector storage domain.
     virtual expected<DataSetPtr>
     GetVectorByStorageIds(const DataSetPtr dataset, milvus::OpContext* op_context = nullptr) const {
@@ -671,6 +685,16 @@ class IndexNode : public Object {
     void
     CalcBitsetCount(BitsetView& bitset, const IdMap& id_map, size_t offset = 0,
                     size_t bitset_count = std::numeric_limits<size_t>::max()) const {
+        if (!bitset.is_bitmap()) {
+            // Project/count mandatory visibility only. Preserve the descriptor
+            // and public row domain; sampled truth is never an exact count.
+            auto mandatory = bitset;
+            mandatory.set_candidate_evaluator(nullptr);
+            CalcBitsetCount(mandatory, id_map, offset, bitset_count);
+            bitset.set_vector_count(mandatory.size());
+            bitset.set_filter_count(mandatory.count());
+            return;
+        }
         // Exact filter counts are reported in the backend vector domain.
         if (bitset.num_bits() == 0 || bitset.data() == nullptr) {
             return;

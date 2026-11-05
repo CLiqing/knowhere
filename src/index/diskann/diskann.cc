@@ -45,6 +45,11 @@ class DiskANNIndexNode : public IndexNode {
                   "DiskANN only support floating point data type(float32, float16, bfloat16)");
 
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     using DistType = float;
     DiskANNIndexNode(const int32_t& version, const Object& object)
         : IndexNode(version), is_prepared_(false), dim_(-1), count_(-1) {

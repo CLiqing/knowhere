@@ -40,6 +40,11 @@ namespace knowhere {
 template <typename DataType>
 class SvsVamanaIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     SvsVamanaIndexNode(const int32_t version, const Object& object) : IndexNode(version), index_(nullptr) {
         search_pool_ = ThreadPool::GetGlobalSearchThreadPool();
     }

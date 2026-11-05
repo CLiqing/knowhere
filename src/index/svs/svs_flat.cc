@@ -31,6 +31,11 @@ namespace knowhere {
 template <typename DataType>
 class SvsFlatIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     SvsFlatIndexNode(const int32_t version, const Object& object) : IndexNode(version), index_(nullptr) {
         search_pool_ = ThreadPool::GetGlobalSearchThreadPool();
     }

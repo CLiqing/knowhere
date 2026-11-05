@@ -75,6 +75,11 @@ namespace knowhere {
 //
 class BaseFaissIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     BaseFaissIndexNode(const int32_t& version, const Object& object) : IndexNode(version) {
         build_pool = ThreadPool::GetGlobalBuildThreadPool();
         search_pool = ThreadPool::GetGlobalSearchThreadPool();

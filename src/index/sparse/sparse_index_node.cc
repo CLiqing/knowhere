@@ -102,6 +102,11 @@ class SparseInvertedIndexNode : public IndexNode {
     using value_type = typename T::ValueType;
 
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     explicit SparseInvertedIndexNode(const int32_t& version, const Object& /*object*/)
         : search_pool_(ThreadPool::GetGlobalSearchThreadPool()),
           build_pool_(ThreadPool::GetGlobalBuildThreadPool()),

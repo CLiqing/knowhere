@@ -30,6 +30,11 @@ namespace knowhere {
 template <typename DataType>
 class MinHashLSHNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     using DistType = float;
     MinHashLSHNode(const int32_t& version, const Object& object) {
         if (typeid(object) == typeid(Pack<std::shared_ptr<milvus::FileManager>>)) {

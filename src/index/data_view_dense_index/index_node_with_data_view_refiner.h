@@ -37,6 +37,11 @@ class IndexNodeWithDataViewRefiner : public IndexNode {
     static_assert(KnowhereFloatTypeCheck<DataType>::value);
 
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     IndexNodeWithDataViewRefiner(const int32_t& version, const Object& object) {
         auto data_view_index_pack = dynamic_cast<const Pack<ViewDataOp>*>(&object);
         assert(data_view_index_pack != nullptr);

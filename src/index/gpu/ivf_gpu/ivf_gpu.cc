@@ -49,6 +49,11 @@ struct KnowhereConfigType<faiss::IndexIVFScalarQuantizer> {
 template <typename T>
 class GpuIvfIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     GpuIvfIndexNode(const int32_t& version, const Object& object) : index_(nullptr) {
         static_assert(std::is_same<T, faiss::IndexIVFFlat>::value || std::is_same<T, faiss::IndexIVFPQ>::value ||
                       std::is_same<T, faiss::IndexIVFScalarQuantizer>::value);

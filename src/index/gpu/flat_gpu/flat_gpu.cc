@@ -24,6 +24,11 @@ namespace knowhere {
 template <typename T>
 class GpuFlatIndexNode : public IndexNode {
  public:
+    expected<PreparedBitset>
+    PrepareBitset(BitsetView bitset) const override {
+        return PrepareBitmapOnly(bitset);
+    }
+
     GpuFlatIndexNode(const int32_t& version, const Object& object) : index_(nullptr) {
     }
 
