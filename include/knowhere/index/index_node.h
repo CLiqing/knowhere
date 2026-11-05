@@ -337,30 +337,14 @@ class IndexNode : public Object {
             return expected<PreparedBitset>::Err(Status::not_implemented,
                                                  "Backend filter preparation is not yet adapted for deferred filters");
         }
-        return PrepareBitsetProjection(bitset);
-    }
-
-    // Opt-in execution plumbing for consumers whose entire search path uses
-    // complete test(). Unadapted backends retain the default rejection above.
-    expected<PreparedBitset>
-    PrepareBitsetProjection(BitsetView bitset) const {
-        if (!bitset.is_bitmap() && emb_list_offset_ != nullptr) {
-            return expected<PreparedBitset>::Err(Status::not_implemented,
-                                                 "Deferred embedding-list projection is not yet qualified");
-        }
         PreparedBitset prepared(bitset);
         const auto& id_map = GetIdMap();
         // A sealed validity bitmap may omit trailing NULL rows. Keep the caller's
         // query boundary even when it extends beyond the represented valid IDs.
         if (bitset.num_bits() == 0) {
-            if (!bitset.is_bitmap()) {
-                PrepareBitsetMap(prepared, id_map);
-                prepared.bitset.set_vector_count(static_cast<size_t>(Count()));
-                prepared.bitset.set_filter_count(0);
-            }
             return prepared;
         }
-        if (bitset.mandatory_data() == nullptr) {
+        if (bitset.data() == nullptr) {
             const auto msg = std::string("bitset data is null while bitset size is non-zero");
             LOG_KNOWHERE_ERROR_ << msg;
             return expected<PreparedBitset>::Err(Status::invalid_args, msg);
@@ -687,16 +671,6 @@ class IndexNode : public Object {
     void
     CalcBitsetCount(BitsetView& bitset, const IdMap& id_map, size_t offset = 0,
                     size_t bitset_count = std::numeric_limits<size_t>::max()) const {
-        if (!bitset.is_bitmap()) {
-            // Keep exact mandatory counts in the backend domain, without
-            // evaluating the residual or substituting its sampled ratio.
-            auto mandatory = bitset;
-            mandatory.set_candidate_evaluator(nullptr);
-            CalcBitsetCount(mandatory, id_map, offset, bitset_count);
-            bitset.set_vector_count(mandatory.size());
-            bitset.set_filter_count(mandatory.count());
-            return;
-        }
         // Exact filter counts are reported in the backend vector domain.
         if (bitset.num_bits() == 0 || bitset.data() == nullptr) {
             return;
