@@ -8,8 +8,10 @@
 #include <bit>
 #include <cstddef>
 #include <stdexcept>
+#include <vector>
 
 #include "knowhere/candidate_evaluator.h"
+#include "knowhere/filter_batch_result.h"
 
 namespace knowhere {
 
@@ -37,6 +39,19 @@ class CandidateEvaluatorExecution {
     CandidateEvaluatorExecution&
     operator=(const CandidateEvaluatorExecution&) = delete;
 
+    int32_t*
+    row_buffer(size_t count) {
+        mapped_rows_.resize(count);
+        return mapped_rows_.data();
+    }
+    uint64_t*
+    active_buffer(size_t count) {
+        active_words_.assign(FilterBatchResult::WordCount(count), ~uint64_t{0});
+        if (count != 0)
+            active_words_.back() &= FilterBatchResult::TailMask(count);
+        return active_words_.data();
+    }
+
     static uint64_t
     LaneMask(uint32_t count) {
         if (count > 64) {
@@ -48,13 +63,24 @@ class CandidateEvaluatorExecution {
     // Public segment offsets, not primary keys. A set return bit means excluded,
     // including inactive lanes. No inactive row is evaluated by the producer.
     uint64_t
-    test(const int32_t* ids, uint32_t count, uint64_t active) {
+    test_word(const int32_t* ids, uint32_t count, uint64_t active) {
         const auto lanes = LaneMask(count);
         if ((active & ~lanes) != 0 || (count != 0 && ids == nullptr)) {
             throw std::invalid_argument("invalid candidate batch IDs/mask");
         }
         if (active == 0) {
             return lanes;
+        }
+        if (!view_.memoize) {
+            uint64_t accepted = 0;
+            if (view_.eval_batch(worker_, ids, count, &active, &accepted) != CandidateEvalStatus::Success) {
+                throw std::runtime_error("candidate callback failed");
+            }
+            if ((accepted & ~active) != 0)
+                throw std::runtime_error("candidate callback returned inactive lanes");
+            ++batch_calls;
+            rows += std::popcount(active);
+            return lanes & ~accepted;
         }
         // Reserve for the whole batch before retaining value pointers: F14
         // stores values inline, so rehash must not move them during insertion.
@@ -80,7 +106,7 @@ class CandidateEvaluatorExecution {
             }
             if (missing != 0) {
                 uint64_t produced = 0;
-                if (view_.eval_batch(worker_, ids, count, missing, &produced) != CandidateEvalStatus::Success) {
+                if (view_.eval_batch(worker_, ids, count, &missing, &produced) != CandidateEvalStatus::Success) {
                     throw std::runtime_error("candidate callback failed");
                 }
                 if ((produced & ~missing) != 0) {
@@ -111,6 +137,67 @@ class CandidateEvaluatorExecution {
         return lanes & ~accepted;
     }
 
+    // Arbitrary-length transport. The common <=64 memoized kernel above stays
+    // allocation-free; a post batch bypasses the verdict map altogether.
+    FilterBatchResult
+    test(const int32_t* ids, size_t count, const uint64_t* active) {
+        if (count != 0 && ids == nullptr)
+            throw std::invalid_argument("invalid candidate batch IDs");
+        if (count <= 64) {
+            return FilterBatchResult::FromWord(
+                count, test_word(ids, static_cast<uint32_t>(count),
+                                 active == nullptr ? LaneMask(static_cast<uint32_t>(count)) : active[0]));
+        }
+        FilterBatchResult excluded(count, true);
+        if (!view_.memoize) {
+            // The producer writes accepted bits directly into the owned return
+            // buffer; validate/invert in place instead of allocating another.
+            std::fill_n(excluded.data(), FilterBatchResult::WordCount(count), uint64_t{0});
+            if (view_.eval_batch(worker_, ids, count, active, excluded.data()) != CandidateEvalStatus::Success)
+                throw std::runtime_error("candidate callback failed");
+            size_t evaluated = 0;
+            for (size_t word = 0; word < FilterBatchResult::WordCount(count); ++word) {
+                const auto mask =
+                    word + 1 == FilterBatchResult::WordCount(count) ? FilterBatchResult::TailMask(count) : ~uint64_t{0};
+                const auto enabled = active == nullptr ? mask : active[word] & mask;
+                if ((excluded.data()[word] & ~enabled) != 0)
+                    throw std::runtime_error("candidate callback returned inactive lanes");
+                excluded.data()[word] = mask & ~excluded.data()[word];
+                evaluated += std::popcount(enabled);
+            }
+            ++batch_calls;
+            rows += evaluated;
+            return excluded;
+        }
+        // Only the large memoized case needs a batch-local index. Do not put
+        // lane positions into the byte-sized final-verdict cache.
+        std::vector<int32_t> missing;
+        folly::F14ValueMap<int32_t, size_t> pending;
+        for (size_t lane = 0; lane < count; ++lane) {
+            if (active != nullptr && ((active[lane / 64] >> (lane % 64)) & 1) == 0)
+                continue;
+            if (verdicts_.find(ids[lane]) == verdicts_.end() && pending.try_emplace(ids[lane], missing.size()).second)
+                missing.push_back(ids[lane]);
+        }
+        if (!missing.empty()) {
+            FilterBatchResult accepted(missing.size());
+            if (view_.eval_batch(worker_, missing.data(), missing.size(), nullptr, accepted.data()) !=
+                CandidateEvalStatus::Success)
+                throw std::runtime_error("candidate callback failed");
+            if ((accepted.data()[FilterBatchResult::WordCount(missing.size()) - 1] &
+                 ~FilterBatchResult::TailMask(missing.size())) != 0)
+                throw std::runtime_error("candidate callback returned out-of-domain lanes");
+            for (size_t i = 0; i < missing.size(); ++i) verdicts_.insert_or_assign(missing[i], uint8_t{accepted[i]});
+            ++batch_calls;
+            rows += missing.size();
+        }
+        for (size_t lane = 0; lane < count; ++lane) {
+            if (active == nullptr || ((active[lane / 64] >> (lane % 64)) & 1) != 0)
+                excluded.set(lane, verdicts_.at(ids[lane]) == 0);
+        }
+        return excluded;
+    }
+
     size_t batch_calls = 0;
     // Successfully evaluated distinct public rows in this independent task.
     size_t rows = 0;
@@ -119,5 +206,7 @@ class CandidateEvaluatorExecution {
     CandidateEvaluatorView view_;
     void* worker_ = nullptr;
     folly::F14ValueMap<int32_t, uint8_t> verdicts_;
+    std::vector<int32_t> mapped_rows_;
+    std::vector<uint64_t> active_words_;
 };
 }  // namespace knowhere
