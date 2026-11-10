@@ -3,8 +3,10 @@ project(knowhere CXX C)
 
 # Use short SHA1 as version
 # currenly checkout a commit for cardinal v2. TODO: need a tag here
-set(CARDINAL_VERSION bd6fa5023aeb2cf80c060ac6ba77abc3db6183c2)
-set(CARDINAL_REPO_URL "https://github.com/zilliztech/cardinal.git")
+set(CARDINAL_VERSION b5146c0a5b1305e23ba7cfb9bf368395d4a52e74)
+# Review dependency: restore the official URL/pin after the matching Cardinal
+# change is merged. The personal Cardinal repository is private as well.
+set(CARDINAL_REPO_URL "https://github.com/CLiqing/cardinal.git")
 
 set(CARDINAL_ROOT  "${KNOWHERE_THRID_ROOT}/cardinalv2")
 message(STATUS "Build Cardinal-${CARDINAL_VERSION}")

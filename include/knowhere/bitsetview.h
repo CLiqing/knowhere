@@ -41,6 +41,10 @@
 
 namespace knowhere {
 
+// Per-search execution placement, chosen by the caller. This is not an index
+// format version or an automatic policy decision inside a search backend.
+enum class FilterMode : uint8_t { PreFilter, InFilter, PostFilter };
+
 // Non-owning filter view.
 //
 // bits_ is always addressed by public ids. Backend selectors pass dense
@@ -70,15 +74,20 @@ class BitsetView {
     // Production search consumers reject this form until explicitly adapted.
     void
     set_candidate_evaluator(const CandidateEvaluatorView* evaluator,
-                            std::optional<size_t> public_row_count = std::nullopt) {
+                            std::optional<size_t> public_row_count = std::nullopt,
+                            FilterMode mode = FilterMode::InFilter) {
         if (evaluator != nullptr && !evaluator->valid()) {
             throw std::invalid_argument("invalid candidate evaluator descriptor");
+        }
+        if (evaluator != nullptr && mode != FilterMode::InFilter && mode != FilterMode::PostFilter) {
+            throw std::invalid_argument("a deferred evaluator requires in-filter or post-filter mode");
         }
         if (evaluator != nullptr && ((!public_row_count.has_value() && num_bits_ == 0) ||
                                      (num_bits_ != 0 && public_row_count.value_or(num_bits_) != num_bits_))) {
             throw std::invalid_argument("candidate evaluator requires a consistent public row domain");
         }
         candidate_evaluator_ = evaluator;
+        filter_mode_ = evaluator == nullptr ? FilterMode::PreFilter : mode;
         bitmap_test_limit_ =
             evaluator == nullptr ? static_cast<uint32_t>(std::min<size_t>(num_bits_, size_t{1} << 31)) : 0;
         evaluator_rows_ = public_row_count.value_or(num_bits_);
@@ -99,21 +108,23 @@ class BitsetView {
     BitsetView
     bind() const {
         auto result = *this;
-        result.execution_ = candidate_evaluator_ == nullptr
-                                ? nullptr
-                                : std::make_shared<CandidateEvaluatorExecution>(*candidate_evaluator_);
+        if (candidate_evaluator_ != nullptr) {
+            auto descriptor = *candidate_evaluator_;
+            // Post submits each candidate only once; do not pay for or hide
+            // scheduling mistakes behind the in-filter verdict cache.
+            if (filter_mode_ == FilterMode::PostFilter) {
+                descriptor.memoize = false;
+            }
+            result.execution_ = std::make_shared<CandidateEvaluatorExecution>(descriptor);
+        } else {
+            result.execution_.reset();
+        }
         return result;
     }
 
-    // Navigation projection for a coarse post-filter task. Preserve public
-    // bitmap/domain/reorder metadata, but never run a residual predicate here.
-    BitsetView
-    mandatory_only() const {
-        auto result = *this;
-        result.candidate_evaluator_ = nullptr;
-        result.execution_.reset();
-        result.bitmap_test_limit_ = static_cast<uint32_t>(std::min<size_t>(num_bits_, size_t{1} << 31));
-        return result;
+    FilterMode
+    filter_mode() const {
+        return filter_mode_;
     }
 
     bool
@@ -346,12 +357,15 @@ class BitsetView {
         // the existing public-domain, mandatory bitmap, binding and producer
         // error handling and writes the REAL projected row before callback.
         const int32_t lane = 0;
-        return test_rows(&lane, 1, false, [=, this](int32_t) -> int64_t {
-                   if (unprojected < id_offset_ || row > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
-                       return -1;
-                   }
-                   return static_cast<int64_t>(row);
-               }) != 0;
+        return test_rows(
+                   &lane, 1, false,
+                   [=, this](int32_t) -> int64_t {
+                       if (unprojected < id_offset_ || row > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+                           return -1;
+                       }
+                       return static_cast<int64_t>(row);
+                   },
+                   filter_mode_ != FilterMode::PostFilter) != 0;
     }
 
     // Internal prefilter only: true means excluded by mandatory visibility.
@@ -391,21 +405,52 @@ class BitsetView {
     // mandatory-only; an all-visible bitmap still runs the callback.
     FilterBatchResult
     test(const int32_t* ids, size_t count) const {
+        return test_batch_(ids, count, filter_mode_ != FilterMode::PostFilter);
+    }
+
+    // Complete result-admissibility check in every mode. Unlike test(), this
+    // always evaluates a deferred user predicate, including in post-filter.
+    // Set result bits still mean excluded, not accepted.
+    FilterBatchResult
+    test_candidates(const int32_t* ids, size_t count) const {
+        return test_batch_(ids, count, true);
+    }
+
+    bool
+    test_candidates(int64_t id) const {
+        if (filter_mode_ != FilterMode::PostFilter) {
+            return test(id);
+        }
+        if (id < 0 || id > std::numeric_limits<int32_t>::max()) {
+            return true;
+        }
+        const auto row = static_cast<int32_t>(id);
+        return test_batch_(&row, 1, true)[0];
+    }
+
+ private:
+    FilterBatchResult
+    test_batch_(const int32_t* ids, size_t count, bool evaluate_user) const {
         if (count != 0 && ids == nullptr) {
             throw std::invalid_argument("invalid batch IDs");
         }
         if (count > 64) {
-            return test_rows_bulk(ids, count, !has_out_ids() && id_offset_ == 0, [&](int32_t id) -> int64_t {
-                if (id < 0 || static_cast<size_t>(id) > std::numeric_limits<size_t>::max() - id_offset_)
-                    return -1;
-                const size_t row = static_cast<size_t>(id) + id_offset_;
-                if (has_out_ids())
-                    return row < out_ids_count_ ? out_ids_[row] : -1;
-                return row <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) ? static_cast<int64_t>(row) : -1;
-            });
+            return test_rows_bulk(
+                ids, count, !has_out_ids() && id_offset_ == 0,
+                [&](int32_t id) -> int64_t {
+                    if (id < 0 || static_cast<size_t>(id) > std::numeric_limits<size_t>::max() - id_offset_)
+                        return -1;
+                    const size_t row = static_cast<size_t>(id) + id_offset_;
+                    if (has_out_ids())
+                        return row < out_ids_count_ ? out_ids_[row] : -1;
+                    return row <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) ? static_cast<int64_t>(row)
+                                                                                           : -1;
+                },
+                evaluate_user);
         }
         if (candidate_evaluator_ != nullptr) [[unlikely]] {
-            return FilterBatchResult::FromWord(count, test_deferred_batch_(ids, static_cast<uint32_t>(count)));
+            return FilterBatchResult::FromWord(count,
+                                               test_deferred_batch_(ids, static_cast<uint32_t>(count), evaluate_user));
         }
         // This is the original single-ID bitmap test packed once per batch.
         // No callback workspace, active-lane checks or 64-ID scratch array
@@ -442,20 +487,23 @@ class BitsetView {
     }
 
     KNOWHERE_BITSET_NOINLINE uint64_t
-    test_deferred_batch_(const int32_t* ids, uint32_t count) const {
-        return test_rows(ids, count, !has_out_ids() && id_offset_ == 0, [&](int32_t id) -> int64_t {
-            if (id < 0 || static_cast<size_t>(id) > std::numeric_limits<size_t>::max() - id_offset_) {
-                return -1;
-            }
-            size_t row = static_cast<size_t>(id) + id_offset_;
-            if (has_out_ids()) {
-                return row < out_ids_count_ ? out_ids_[row] : -1;
-            }
-            if (row > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
-                return -1;
-            }
-            return row;
-        });
+    test_deferred_batch_(const int32_t* ids, uint32_t count, bool evaluate_user) const {
+        return test_rows(
+            ids, count, !has_out_ids() && id_offset_ == 0,
+            [&](int32_t id) -> int64_t {
+                if (id < 0 || static_cast<size_t>(id) > std::numeric_limits<size_t>::max() - id_offset_) {
+                    return -1;
+                }
+                size_t row = static_cast<size_t>(id) + id_offset_;
+                if (has_out_ids()) {
+                    return row < out_ids_count_ ? out_ids_[row] : -1;
+                }
+                if (row > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+                    return -1;
+                }
+                return row;
+            },
+            evaluate_user);
     }
 
  public:
@@ -465,17 +513,32 @@ class BitsetView {
     // no allocation, intermediate ID pass or extra indirect call is needed.
     FilterBatchResult
     test_mapped(const int32_t* ids, size_t count, const int32_t* row_map, size_t id_count) const {
+        return test_mapped_batch_(ids, count, row_map, id_count, filter_mode_ != FilterMode::PostFilter);
+    }
+
+    FilterBatchResult
+    test_candidates_mapped(const int32_t* ids, size_t count, const int32_t* row_map, size_t id_count) const {
+        return test_mapped_batch_(ids, count, row_map, id_count, true);
+    }
+
+ private:
+    FilterBatchResult
+    test_mapped_batch_(const int32_t* ids, size_t count, const int32_t* row_map, size_t id_count,
+                       bool evaluate_user) const {
         if (count != 0 && ids == nullptr) {
             throw std::invalid_argument("invalid mapped batch IDs");
         }
         if (count > 64) {
-            return test_rows_bulk(ids, count, row_map == nullptr, [=](int32_t id) -> int64_t {
-                return id < 0 || static_cast<size_t>(id) >= id_count ? -1 : row_map == nullptr ? id : row_map[id];
-            });
+            return test_rows_bulk(
+                ids, count, row_map == nullptr,
+                [=](int32_t id) -> int64_t {
+                    return id < 0 || static_cast<size_t>(id) >= id_count ? -1 : row_map == nullptr ? id : row_map[id];
+                },
+                evaluate_user);
         }
         if (candidate_evaluator_ != nullptr) [[unlikely]] {
             return FilterBatchResult::FromWord(
-                count, test_deferred_mapped_(ids, static_cast<uint32_t>(count), row_map, id_count));
+                count, test_deferred_mapped_(ids, static_cast<uint32_t>(count), row_map, id_count, evaluate_user));
         }
         uint64_t excluded = 0;
         for (uint32_t lane = 0; lane < count; ++lane) {
@@ -493,25 +556,30 @@ class BitsetView {
 
  private:
     KNOWHERE_BITSET_NOINLINE uint64_t
-    test_deferred_mapped_(const int32_t* ids, uint32_t count, const int32_t* row_map, size_t id_count) const {
+    test_deferred_mapped_(const int32_t* ids, uint32_t count, const int32_t* row_map, size_t id_count,
+                          bool evaluate_user) const {
         if (row_map == nullptr) {
-            return test_rows(ids, count, true, [=](int32_t id) -> int32_t {
-                return id < 0 || static_cast<size_t>(id) >= id_count ? -1 : id;
-            });
+            return test_rows(
+                ids, count, true,
+                [=](int32_t id) -> int32_t { return id < 0 || static_cast<size_t>(id) >= id_count ? -1 : id; },
+                evaluate_user);
         }
-        return test_rows(ids, count, false, [=](int32_t id) -> int32_t {
-            if (id < 0 || static_cast<size_t>(id) >= id_count) {
-                return -1;
-            }
-            return row_map[id];
-        });
+        return test_rows(
+            ids, count, false,
+            [=](int32_t id) -> int32_t {
+                if (id < 0 || static_cast<size_t>(id) >= id_count) {
+                    return -1;
+                }
+                return row_map[id];
+            },
+            evaluate_user);
     }
 
     template <typename RowAt>
     uint64_t
-    test_rows(const int32_t* ids, uint32_t count, bool borrow_ids, RowAt row_at) const {
+    test_rows(const int32_t* ids, uint32_t count, bool borrow_ids, RowAt row_at, bool evaluate_user) const {
         const auto lanes = CandidateEvaluatorExecution::LaneMask(count);
-        if ((count != 0 && ids == nullptr) || !bound()) {
+        if ((count != 0 && ids == nullptr) || (evaluate_user && !bound())) {
             throw std::invalid_argument("invalid batch IDs or unbound filter");
         }
         if (count == 0) {
@@ -521,21 +589,22 @@ class BitsetView {
         // is common for all-visible sealed segments, but a zero backend count
         // is NOT enough to omit a public-domain bitmap (see below).
         if (num_bits_ == 0) {
-            return test_rows_impl<false>(ids, count, lanes, borrow_ids, row_at);
+            return test_rows_impl<false>(ids, count, lanes, borrow_ids, row_at, evaluate_user);
         }
         // With an identity projection and a count covering the entire public
         // domain, an exact zero proves that the bitmap contains no exclusions.
         // A window or compacted/mapped count cannot establish this property.
         // Still check public row bounds, including an adapter's reorder map.
         if (vector_count_ == num_bits_ && id_offset_ == 0 && !has_out_ids() && filtered_count_.value_or(1) == 0) {
-            return test_rows_impl<false>(ids, count, lanes, borrow_ids, row_at);
+            return test_rows_impl<false>(ids, count, lanes, borrow_ids, row_at, evaluate_user);
         }
-        return test_rows_impl<true>(ids, count, lanes, borrow_ids, row_at);
+        return test_rows_impl<true>(ids, count, lanes, borrow_ids, row_at, evaluate_user);
     }
 
     template <bool CheckBitmap, typename RowAt>
     uint64_t
-    test_rows_impl(const int32_t* ids, uint32_t count, uint64_t lanes, bool borrow_ids, RowAt row_at) const {
+    test_rows_impl(const int32_t* ids, uint32_t count, uint64_t lanes, bool borrow_ids, RowAt row_at,
+                   bool evaluate_user) const {
         // Most candidate IDs survive mandatory visibility. Clear rejected
         // lanes only, avoiding a shift/OR for every normally active candidate.
         uint64_t active = lanes;  // Only mandatory visibility/ID checks clear lanes.
@@ -561,18 +630,21 @@ class BitsetView {
                 rows[lane] = static_cast<int32_t>(row);
             }
         }
-        return is_bitmap() ? lanes & ~active : execution_->test_word(borrow_ids ? ids : rows.data(), count, active);
+        return !evaluate_user || is_bitmap() ? lanes & ~active
+                                             : execution_->test_word(borrow_ids ? ids : rows.data(), count, active);
     }
 
     template <typename RowAt>
     FilterBatchResult
-    test_rows_bulk(const int32_t* ids, size_t count, bool borrow_ids, RowAt row_at) const {
-        if ((count != 0 && ids == nullptr) || !bound())
+    test_rows_bulk(const int32_t* ids, size_t count, bool borrow_ids, RowAt row_at, bool evaluate_user) const {
+        if ((count != 0 && ids == nullptr) || (evaluate_user && !bound()))
             throw std::invalid_argument("invalid batch IDs or unbound filter");
-        FilterBatchResult bitmap_result(is_bitmap() ? count : 0, true);
-        auto* active = is_bitmap() ? bitmap_result.data() : execution_->active_buffer(count);
-        int32_t* rows = !is_bitmap() && !borrow_ids ? execution_->row_buffer(count) : nullptr;
+        const bool use_evaluator = evaluate_user && !is_bitmap();
+        FilterBatchResult bitmap_result(use_evaluator ? 0 : count, true);
+        auto* active = use_evaluator ? execution_->active_buffer(count) : bitmap_result.data();
+        int32_t* rows = use_evaluator && !borrow_ids ? execution_->row_buffer(count) : nullptr;
         const bool check_bitmap = num_bits_ != 0;
+        bool any_active = false;
         for (size_t lane = 0; lane < count; ++lane) {
             const auto row = row_at(ids[lane]);
             if (row < 0 || static_cast<size_t>(row) >= public_row_count() ||
@@ -580,14 +652,18 @@ class BitsetView {
                 active[lane / 64] &= ~(uint64_t{1} << (lane % 64));
                 continue;
             }
-            if (!is_bitmap() && row > std::numeric_limits<int32_t>::max())
+            any_active = true;
+            if (use_evaluator && row > std::numeric_limits<int32_t>::max())
                 throw std::out_of_range("segment row exceeds callback ID domain");
-            if (!is_bitmap() && !borrow_ids)
+            if (use_evaluator && !borrow_ids)
                 rows[lane] = static_cast<int32_t>(row);
         }
-        if (is_bitmap()) {
+        if (!use_evaluator) {
             bitmap_result.flip();
             return bitmap_result;
+        }
+        if (!any_active) {
+            return FilterBatchResult(count, true);
         }
         return execution_->test(borrow_ids ? ids : rows, count, active);
     }
@@ -925,6 +1001,7 @@ class BitsetView {
     // field order for bitmap-only code generation. The overall C++ object is
     // still larger: this is NOT a mixed-version binary ABI compatibility claim.
     const CandidateEvaluatorView* candidate_evaluator_ = nullptr;
+    FilterMode filter_mode_ = FilterMode::PreFilter;
     size_t evaluator_rows_ = 0;
     std::shared_ptr<CandidateEvaluatorExecution> execution_;
 };
