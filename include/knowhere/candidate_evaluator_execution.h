@@ -2,12 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include <folly/container/F14Map.h>
-
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include "knowhere/candidate_evaluator.h"
@@ -82,8 +82,8 @@ class CandidateEvaluatorExecution {
             rows += std::popcount(active);
             return lanes & ~accepted;
         }
-        // Reserve for the whole batch before retaining value pointers: F14
-        // stores values inline, so rehash must not move them during insertion.
+        // Reserve bucket capacity for the batch. std::unordered_map keeps
+        // pointers to stored verdicts valid even if insertion triggers a rehash.
         verdicts_.reserve(verdicts_.size() + std::popcount(active));
         // Values 0/1 are final public-row verdicts; 2..65 name the first lane
         // of a same-batch miss. Group OR and mandatory visibility stay outside.
@@ -138,7 +138,7 @@ class CandidateEvaluatorExecution {
     }
 
     // Arbitrary-length transport. The common <=64 memoized kernel above stays
-    // allocation-free; a post batch bypasses the verdict map altogether.
+    // free of result-buffer allocation; a post batch bypasses the verdict map.
     FilterBatchResult
     test(const int32_t* ids, size_t count, const uint64_t* active) {
         if (count != 0 && ids == nullptr)
@@ -172,7 +172,7 @@ class CandidateEvaluatorExecution {
         // Only the large memoized case needs a batch-local index. Do not put
         // lane positions into the byte-sized final-verdict cache.
         std::vector<int32_t> missing;
-        folly::F14ValueMap<int32_t, size_t> pending;
+        std::unordered_map<int32_t, size_t> pending;
         for (size_t lane = 0; lane < count; ++lane) {
             if (active != nullptr && ((active[lane / 64] >> (lane % 64)) & 1) == 0)
                 continue;
@@ -205,7 +205,7 @@ class CandidateEvaluatorExecution {
  private:
     CandidateEvaluatorView view_;
     void* worker_ = nullptr;
-    folly::F14ValueMap<int32_t, uint8_t> verdicts_;
+    std::unordered_map<int32_t, uint8_t> verdicts_;
     std::vector<int32_t> mapped_rows_;
     std::vector<uint64_t> active_words_;
 };
