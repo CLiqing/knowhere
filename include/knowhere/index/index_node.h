@@ -77,6 +77,17 @@ struct LoadRequirements {
     bool needs_external_validity = true;
 };
 
+struct CandidateEvaluatorView;
+
+// Explicit opt-in: ordinary indexes and wrappers cannot silently ignore a predicate.
+class CandidateEvaluatorSearch {
+ public:
+    virtual ~CandidateEvaluatorSearch() = default;
+    virtual expected<DataSetPtr>
+    SearchWithEvaluator(const DataSetPtr dataset, std::unique_ptr<Config> cfg, const BitsetView& bitset,
+                        const CandidateEvaluatorView& evaluator, milvus::OpContext* op_context) const = 0;
+};
+
 class IndexNode : public Object {
  public:
     IndexNode(const int32_t ver) : version_(ver) {

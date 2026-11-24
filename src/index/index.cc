@@ -9,6 +9,7 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include "knowhere/candidate_evaluator.h"
 #include "knowhere/index/index.h"
 
 #include <cstdint>
@@ -562,6 +563,30 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
         auto res = this->node->SearchEmbListIfNeed(dataset, std::move(cfg), prepared_bitset.bitset, op_context);
 #endif
         return res;
+    });
+}
+
+template <typename T>
+inline expected<DataSetPtr>
+Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& bitset,
+                 const CandidateEvaluatorView& evaluator, milvus::OpContext* op_context) const noexcept {
+    return GuardedCall([&]() -> expected<DataSetPtr> {
+        const auto* backend = dynamic_cast<const CandidateEvaluatorSearch*>(this->node);
+        if (!backend) return expected<DataSetPtr>::Err(Status::not_implemented, "index does not accept an evaluator");
+        if (!dataset || !evaluator.valid() || (bitset.num_bits() && bitset.num_bits() != evaluator.row_count) ||
+            dataset->Get<const size_t*>(meta::EMB_LIST_OFFSET)) {
+            return expected<DataSetPtr>::Err(Status::invalid_args, "invalid row-level evaluator search");
+        }
+        auto cfg = this->node->CreateConfig();
+        std::string msg;
+        auto status = LoadConfig(cfg.get(), json, knowhere::SEARCH, "Search", &msg);
+        if (status != Status::success) return expected<DataSetPtr>::Err(status, msg);
+        if (json.contains("radius") || (cfg->metric_type && get_el_metric_type(*cfg->metric_type).has_value())) {
+            return expected<DataSetPtr>::Err(Status::invalid_args, "evaluator does not support range or emb-list search");
+        }
+        auto prepared = this->node->PrepareBitset(bitset);
+        if (!prepared.has_value()) return expected<DataSetPtr>::Err(prepared.error(), prepared.what());
+        return backend->SearchWithEvaluator(dataset, std::move(cfg), prepared.value().bitset, evaluator, op_context);
     });
 }
 
