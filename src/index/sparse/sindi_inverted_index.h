@@ -1662,7 +1662,7 @@ class SindiInvertedIndex : public DimMapInvertedIndex<DataType, AllowIncremental
         const size_t rows = doc_order_span_.size();
         // A bitmap shorter than the index also filters the rows past its end; the id mapping
         // would hide that boundary, so such bitmaps are materialized below.
-        if (bitset.is_bitmap() && !bitset.has_out_ids() && bitset.id_offset() == 0 && bitset.num_bits() >= rows) {
+        if (bitset.supports_direct_test(rows)) {
             BitsetView mapped = bitset;
             mapped.set_out_ids(doc_order_ids_, doc_order_ids_.size());
             return mapped;

@@ -77,6 +77,17 @@ struct LoadRequirements {
     bool needs_external_validity = true;
 };
 
+struct CandidateEvaluatorView;
+
+// Explicit opt-in: ordinary indexes and wrappers cannot silently ignore a predicate.
+class CandidateEvaluatorSearch {
+ public:
+    virtual ~CandidateEvaluatorSearch() = default;
+    virtual expected<DataSetPtr>
+    SearchWithEvaluator(const DataSetPtr dataset, std::unique_ptr<Config> cfg, const BitsetView& bitset,
+                        const CandidateEvaluatorView& evaluator, milvus::OpContext* op_context) const = 0;
+};
+
 class IndexNode : public Object {
  public:
     IndexNode(const int32_t ver) : version_(ver) {
@@ -330,13 +341,6 @@ class IndexNode : public Object {
     // Projects a public-id bitset to the backend id domain.
     virtual expected<PreparedBitset>
     PrepareBitset(BitsetView bitset) const {
-        // This is a transport foundation release, not a backend rollout.
-        // In particular, the legacy num_bits()==0 early return below is not a
-        // valid callback-only preparation. Reject instead of losing projection.
-        if (!bitset.is_bitmap()) {
-            return expected<PreparedBitset>::Err(Status::not_implemented,
-                                                 "Backend filter preparation is not yet adapted for deferred filters");
-        }
         PreparedBitset prepared(bitset);
         const auto& id_map = GetIdMap();
         // A sealed validity bitmap may omit trailing NULL rows. Keep the caller's

@@ -254,6 +254,10 @@ class Index {
     Search(const DataSetPtr dataset, const Json& json, const BitsetView& bitset,
            milvus::OpContext* op_context = nullptr) const noexcept;
 
+    expected<DataSetPtr>
+    Search(const DataSetPtr dataset, const Json& json, const BitsetView& bitset,
+           const CandidateEvaluatorView& evaluator, milvus::OpContext* op_context = nullptr) const noexcept;
+
     expected<std::vector<IndexNode::IteratorPtr>>
     AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetView& bitset,
                 bool use_knowhere_search_pool = true, milvus::OpContext* op_context = nullptr) const noexcept;

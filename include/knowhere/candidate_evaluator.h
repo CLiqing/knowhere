@@ -1,48 +1,73 @@
-// Copyright (C) 2026 Zilliz. All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 namespace knowhere {
 
-enum class CandidateEvalStatus : uint32_t { Success = 0, InvalidArgument = 1, Failed = 2 };
+enum class CandidateEvalStatus : uint32_t { Success, InvalidArgument, Failed };
 
-// Creates one private mutable workspace. context is the query-owned factory;
-// output is caller-owned and receives an opaque worker on success, nullptr on
-// failure. The factory and query sources must outlive all workers.
-using CandidateCreateWorkerFn = CandidateEvalStatus (*)(const void* context, void** output) noexcept;
-// Destroys a worker through its originating library; nullptr is allowed.
-using CandidateDestroyWorkerFn = void (*)(void* worker) noexcept;
-// row_ids are segment row offsets (not primary keys or backend reordered IDs).
-// count is 0..64; active_mask selects the lanes to evaluate. Inactive IDs are
-// never read. accepted_mask is caller-owned: bit i means active row i is TRUE;
-// FALSE/UNKNOWN are rejected. Errors are status values, never predicate FALSE.
-// BitsetView derives active_mask internally from mandatory visibility and ID
-// checks; search callers cannot supply an input-lane mask through test().
-using CandidateEvalBatchFn = CandidateEvalStatus (*)(void* worker, const int32_t* row_ids, uint32_t count,
-                                                     uint64_t active_mask, uint64_t* accepted_mask) noexcept;
-
-// Non-owning, fixed-layout descriptor. No STL ownership crosses libraries.
-// abi_major/struct_size validate the exact supported layout, NOT append-only
-// binary compatibility. Layout changes require coordinated versioning/rebuilds.
+// Borrowed during a synchronous search; worker state is private to a search task.
+// Offsets address public rows. Masks use ceil(count/64) words, low bit first;
+// null active means all rows. The producer writes only active, predicate-true lanes.
 struct CandidateEvaluatorView {
-    uint32_t abi_major = 1;
-    uint32_t struct_size = sizeof(CandidateEvaluatorView);
+    size_t row_count = 0;
     const void* context = nullptr;
-    CandidateCreateWorkerFn create_worker = nullptr;
-    CandidateDestroyWorkerFn destroy_worker = nullptr;
-    CandidateEvalBatchFn eval_batch = nullptr;
+    CandidateEvalStatus (*create_worker)(const void*, void**) noexcept = nullptr;
+    void (*destroy_worker)(void*) noexcept = nullptr;
+    CandidateEvalStatus (*eval_batch)(void*, const int32_t*, size_t, const uint64_t*, uint64_t*) noexcept = nullptr;
 
     bool
     valid() const noexcept {
-        return abi_major == 1 && struct_size == sizeof(CandidateEvaluatorView) && context != nullptr &&
-               create_worker != nullptr && destroy_worker != nullptr && eval_batch != nullptr;
+        return row_count != 0 && context && create_worker && destroy_worker && eval_batch;
     }
 };
+static_assert(std::is_standard_layout_v<CandidateEvaluatorView> &&
+              std::is_trivially_copyable_v<CandidateEvaluatorView>);
 
-static_assert(std::is_standard_layout_v<CandidateEvaluatorView>);
-static_assert(std::is_trivially_copyable_v<CandidateEvaluatorView>);
+class CandidateEvaluatorExecution {
+ public:
+    explicit CandidateEvaluatorExecution(const CandidateEvaluatorView& view) noexcept : view_(view) {
+    }
+    CandidateEvaluatorExecution(const CandidateEvaluatorExecution&) = delete;
+    CandidateEvaluatorExecution&
+    operator=(const CandidateEvaluatorExecution&) = delete;
 
+    CandidateEvalStatus
+    Bind() noexcept {
+        if (!view_.valid() || worker_)
+            return CandidateEvalStatus::InvalidArgument;
+        void* worker = nullptr;
+        auto status = view_.create_worker(view_.context, &worker);
+        if (status != CandidateEvalStatus::Success || !worker) {
+            if (worker)
+                view_.destroy_worker(worker);
+            return status == CandidateEvalStatus::Success ? CandidateEvalStatus::Failed : status;
+        }
+        worker_ = worker;
+        return status;
+    }
+
+    CandidateEvalStatus
+    Evaluate(const int32_t* ids, size_t count, const uint64_t* active, uint64_t* accepted) const noexcept {
+        if (!worker_)
+            return CandidateEvalStatus::InvalidArgument;
+        if (!count)
+            return CandidateEvalStatus::Success;
+        if (!ids || !accepted)
+            return CandidateEvalStatus::InvalidArgument;
+        return view_.eval_batch(worker_, ids, count, active, accepted);
+    }
+
+    ~CandidateEvaluatorExecution() {
+        if (worker_)
+            view_.destroy_worker(worker_);
+    }
+
+ private:
+    CandidateEvaluatorView view_;
+    void* worker_ = nullptr;
+};
 }  // namespace knowhere
